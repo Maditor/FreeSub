@@ -1,0 +1,380 @@
+"""Settings: General (look, output folder, ffmpeg), Translation (API keys, models, connection test) and
+Advanced (speech model and tuning, video encoder): things most people never change."""
+import os
+import threading
+
+from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFileDialog, QLineEdit, QMessageBox, QRadioButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout,
+                               QWidget)
+
+from ..config import data_dir, logs_dir, models_dir, settings, ui_language, user_dir
+from ..i18n import LANGS, Keep
+from ..core import ffmpeg, models
+from ..translate import ai
+from .widgets import button, form_row, label, row, section
+
+
+class _Sig(QObject):
+    result = Signal(str, str)      # which label, text
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None, tab: str = "general"):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(600)
+        self.sig = _Sig()
+        self.sig.result.connect(self._result)
+        tabs = QTabWidget()
+        tabs.addTab(self._general(), "General")
+        tabs.addTab(self._translation(), "Translation")
+        tabs.addTab(self._advanced(), "Advanced")
+        tabs.addTab(self._about(), "About")
+        tabs.setCurrentIndex({"translation": 1, "advanced": 2, "about": 3}.get(tab, 0))
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        lay = QVBoxLayout(self)
+        lay.addWidget(tabs)
+        lay.addWidget(bb)
+
+    # ------------------------------------------------------------ General
+    def _general(self):
+        s = settings()
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(10)
+        self.theme = QComboBox()
+        for k, t in (("system", "Follow Windows"), ("light", "Light"), ("dark", "Dark")):
+            self.theme.addItem(t, k)
+        self.theme.setCurrentIndex(max(0, self.theme.findData(s["theme"])))
+        self.lang = QComboBox()
+        self.lang.addItem("Same as Windows", "auto")
+        for k, t in LANGS:
+            self.lang.addItem(Keep(t), k)
+        self.lang.setCurrentIndex(max(0, self.lang.findData(s["language"])))
+        self.lang.setToolTip("The app opens again in the new language.")
+        self.restart = False
+        self.r_video = QRadioButton("Next to each video, in a freesub_<video name> folder")
+        self.r_custom = QRadioButton("In one folder:")
+        g = QButtonGroup(self)
+        g.addButton(self.r_video)
+        g.addButton(self.r_custom)
+        (self.r_custom if s["output_location"] == "custom" else self.r_video).setChecked(True)
+        self.root = QLineEdit(s["output_root"])
+        self.root.setPlaceholderText("e.g. D:\\Subtitles")
+        self.b_root = button("Browse", self._browse_root)
+        self.ff = QLineEdit(s["ffmpeg_path"])
+        self.ff.setPlaceholderText("Empty = the ffmpeg folder next to FreeSub, then PATH")
+        self.ff_state = label("", muted=True, wrap=True)
+        lay.addWidget(form_row("Theme", self.theme))
+        lay.addWidget(form_row("Language", self.lang))
+        self.native_bar = QCheckBox("Use the Windows title bar (instead of FreeSub's own; after a restart)")
+        self.native_bar.setChecked(bool(s["native_titlebar"]))
+        lay.addWidget(self.native_bar)
+        lay.addSpacing(6)
+        lay.addWidget(section("Where results go"))
+        lay.addWidget(label("The .srt files and exported videos are saved here. Work files (audio, voice clips…) "
+                            "stay in FreeSub's own folder and never clutter yours.", muted=True, wrap=True))
+        lay.addWidget(self.r_video)
+        lay.addWidget(row(self.r_custom, self.root, self.b_root))
+        lay.addSpacing(6)
+        lay.addWidget(section("ffmpeg"))
+        lay.addWidget(row(self.ff, button("Browse", self._browse_ff), button("Check", self._test_ff)))
+        lay.addWidget(self.ff_state)
+        lay.addSpacing(6)
+        lay.addWidget(section("Folders"))
+        lay.addWidget(row(button("Work files", lambda: self._open(os.path.join(data_dir(), "projects"))),
+                          button("Models", lambda: self._open(models_dir())),
+                          button("Log", lambda: self._open(logs_dir())),
+                          button("Settings", lambda: self._open(user_dir())), None))
+        lay.addStretch(1)
+        self._test_ff()
+        return w
+
+    # ------------------------------------------------------------ Translation
+    def _translation(self):
+        s = settings()
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(10)
+        lay.addWidget(label("Google Translate needs no key and is used by default. Gemini and Cloudflare are AI "
+                            "services: they translate with the film's context and your names list. Both have a "
+                            "free tier.", muted=True, wrap=True))
+        lay.addWidget(section("Google Gemini"))
+        self.g_key = QLineEdit(s["gemini_key"])
+        self.g_key.setEchoMode(QLineEdit.Password)
+        self.g_key.setPlaceholderText("API key from aistudio.google.com")
+        self.g_model = QComboBox()
+        self.g_model.setEditable(True)
+        self.g_model.addItems(ai.GEMINI_MODELS)
+        self.g_model.setCurrentText(s["gemini_model"])
+        self.g_state = label("", muted=True, wrap=True)
+        lay.addWidget(form_row("API key", self.g_key))
+        lay.addWidget(form_row("Model", self.g_model))
+        lay.addWidget(row(self.g_state, None, button("Test", lambda: self._test("gemini"))))
+        lay.addSpacing(6)
+        lay.addWidget(section("Cloudflare Workers AI"))
+        self.c_acc = QLineEdit(s["cloudflare_account"])
+        self.c_acc.setPlaceholderText("Account ID")
+        self.c_tok = QLineEdit(s["cloudflare_token"])
+        self.c_tok.setEchoMode(QLineEdit.Password)
+        self.c_tok.setPlaceholderText("API token with Workers AI permission")
+        self.c_model = QComboBox()
+        self.c_model.setEditable(True)
+        self.c_model.addItems(ai.CF_MODELS)
+        self.c_model.setCurrentText(s["cloudflare_model"])
+        self.c_state = label("", muted=True, wrap=True)
+        lay.addWidget(form_row("Account ID", self.c_acc))
+        lay.addWidget(form_row("API token", self.c_tok))
+        lay.addWidget(form_row("Model", self.c_model))
+        lay.addWidget(row(self.c_state, None, button("Test", lambda: self._test("cloudflare"))))
+        lay.addSpacing(6)
+        self.go_state = label("", muted=True, wrap=True)
+        lay.addWidget(section("Google Translate"))
+        lay.addWidget(row(self.go_state, None, button("Test", lambda: self._test("google"))))
+        self.fallback = QCheckBox("If a service fails, use the other ones")
+        self.fallback.setChecked(bool(s["translate_fallback"]))
+        lay.addWidget(self.fallback)
+        lay.addWidget(label("Keys are kept in settings.json in Documents\\FreeSub Data, on this PC only.", muted=True, wrap=True))
+        lay.addStretch(1)
+        return w
+
+    # ------------------------------------------------------------ Advanced
+    def _advanced(self):
+        from ..steps import export as ex
+        s = settings()
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(10)
+
+        def spin(lo, hi, value, step=1, suffix="", dec=None):
+            sp = QDoubleSpinBox() if dec is not None else QSpinBox()
+            if dec is not None:
+                sp.setDecimals(dec)
+            sp.setRange(lo, hi)
+            sp.setSingleStep(step)
+            sp.setValue(value)
+            sp.setSuffix(suffix)
+            return sp
+
+        def combo(items, value):
+            c = QComboBox()
+            for k, t in items:
+                c.addItem(t, k)
+            c.setCurrentIndex(max(0, c.findData(value)))
+            return c
+
+        lay.addWidget(label("Fast / Balanced / Best on the main screen choose these for you. Picking a model "
+                            "here makes Quality \"Custom\".", muted=True, wrap=True))
+        lay.addWidget(section("Speech recognition"))
+        self.a_model = QComboBox()
+        for name, (_repo, size, note, _l) in models.WHISPER.items():
+            ready = " · downloaded" if models.whisper_ready(name) else ""
+            self.a_model.addItem(f"{name} · {size} · {note}{ready}", name)
+        self.a_model.setCurrentIndex(max(0, self.a_model.findData(s["whisper_model"])))
+        self.a_beam = spin(1, 10, int(s["whisper_beam"]))
+        self.a_device = combo([("auto", "Auto (NVIDIA GPU if available)"), ("cuda", "NVIDIA GPU (CUDA)"),
+                               ("cpu", "CPU")], s["whisper_device"])
+        self.a_vad = QCheckBox("Skip music and silence (VAD)")
+        self.a_vad.setChecked(bool(s["whisper_vad"]))
+        self.a_filt = QCheckBox("Drop made-up lines (\"thanks for watching\"...)")
+        self.a_filt.setChecked(bool(s["whisper_filter"]))
+        self.a_chars = spin(16, 80, int(s["sub_max_chars"]))
+        self.a_dur = spin(2, 15, float(s["sub_max_duration"]), 0.5, " s", 1)
+        lay.addWidget(form_row("Model", self.a_model, "Downloads on first use"))
+        lay.addWidget(form_row("Beam size", self.a_beam, "Higher = a little more accurate, slower"))
+        lay.addWidget(form_row("Run on", self.a_device))
+        lay.addWidget(self.a_vad)
+        lay.addWidget(self.a_filt)
+        lay.addWidget(form_row("Chars per line", self.a_chars))
+        lay.addWidget(form_row("Longest line", self.a_dur))
+        lay.addSpacing(6)
+        lay.addWidget(section("Reading hard subtitles (OCR)"))
+        self.a_fps = spin(0.5, 10, float(s["ocr_fps"]), 0.5, " frames per second", 1)
+        lay.addWidget(form_row("Frames read", self.a_fps, "More = more exact timing, slower"))
+        lay.addSpacing(6)
+        lay.addWidget(section("Batch"))
+        self.a_lanes = combo([("auto", "Auto (two when this PC has room)"), ("1", "One at a time"),
+                              ("2", "Two at a time")], str(s["parallel_videos"]))
+        lay.addWidget(form_row("Videos at once", self.a_lanes,
+                               "Two at a time: while one video gets its narration and export, the next one's "
+                               "subtitles are made. Faster on most PCs, never more graphics memory. Auto picks "
+                               "it on a PC with 4+ cores and 8+ GB of memory (and a graphics card, or 8 cores)"))
+        lay.addSpacing(6)
+        lay.addWidget(section("Narration"))
+        self.a_up = spin(1.0, 1.6, float(s["dub_max_speed"]), 0.05, " x", 2)
+        lay.addWidget(form_row("Fastest reading", self.a_up,
+                               "A long line is first given more time (it may start a little early or run on "
+                               "into the next line); only then is it read faster, at most this much"))
+        self.a_join = QCheckBox("Read short lines that belong together as one sentence")
+        self.a_join.setToolTip("A sentence split over two lines, or a long line next to a short one, is read "
+                               "in one go over both lines' time. The subtitles do not change.")
+        self.a_join.setChecked(bool(s["dub_join"]))
+        lay.addWidget(self.a_join)
+        self.a_sync = QCheckBox("Subtitles follow the narration")
+        self.a_sync.setToolTip("When a line is read a little earlier or later (or with the next one), its "
+                               "subtitle moves with it, in the preview and in the exported video. "
+                               "The subtitle files (.srt) keep the original times.")
+        self.a_sync.setChecked(bool(s["dub_sync_subs"]))
+        lay.addWidget(self.a_sync)
+        lay.addSpacing(6)
+        lay.addWidget(section("Video"))
+        self.a_enc = combo([("auto", "Auto (fastest that works)")] + [(e, n) for e, _c, n in ex.ENCODERS],
+                           s["export_encoder"])
+        self.a_enc_state = label("", muted=True, wrap=True)
+        self.a_cont = combo([("mp4", "MP4"), ("mkv", "MKV")], s["export_container"])
+        lay.addWidget(form_row("Encoder", row(self.a_enc, button("Check", self._check_encoders))))
+        lay.addWidget(self.a_enc_state)
+        lay.addWidget(form_row("File type", self.a_cont))
+        lay.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(w)
+        return scroll
+
+    # ------------------------------------------------------------ About
+    def _about(self):
+        from ..config import APP_NAME, APP_URL, APP_VERSION
+        from ..tts import kokoro
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(10)
+        title = label(f"{APP_NAME} {APP_VERSION}", name="PanelTitle")
+        lay.addWidget(title)
+        lay.addWidget(label("Subtitles from speech or from the picture, translation, narration and video export. "
+                            "Free and open source (MIT licence).", muted=True, wrap=True))
+        lay.addWidget(row(button("GitHub page", lambda: QDesktopServices.openUrl(QUrl(APP_URL))), None))
+
+        lay.addSpacing(6)
+        lay.addWidget(section("This PC"))
+        gpu = getattr(getattr(self.parent(), "recipe", None), "gpu_text", "") or "Checking…"
+        lay.addWidget(label(gpu, wrap=True))
+        lay.addWidget(label(f"ffmpeg: {ffmpeg.version() or 'not found'}", muted=True, wrap=True))
+
+        lay.addSpacing(6)
+        lay.addWidget(section("Speech quality"))
+        lay.addWidget(label("Fast: a quick draft. Balanced: good for most videos. Best: slowest and most accurate "
+                            "(kotoba-whisper for Japanese, PhoWhisper for Vietnamese, large-v3 for the rest). "
+                            "Separating the voice from the music helps films and anime.", muted=True, wrap=True))
+
+        lay.addSpacing(6)
+        lay.addWidget(section("Narration voices"))
+        lay.addWidget(label("Edge: Microsoft's online voices (needs the internet). Piper: offline voices from the "
+                            "Piper project. Kokoro: offline Vietnamese voices.", muted=True, wrap=True))
+        lay.addWidget(label(kokoro.NOTE, wrap=True))
+        lay.addWidget(row(button("Kokoro page", lambda: QDesktopServices.openUrl(QUrl(kokoro.PAGE))), None))
+
+        lay.addSpacing(6)
+        lay.addWidget(section("Made with"))
+        lay.addWidget(label("faster-whisper (speech), RapidOCR (reading the picture), an MDX-Net model (voice / music "
+                            "separation), CAM++ from 3D-Speaker (telling speakers apart), vig2p / sea-g2p "
+                            "(Vietnamese phonemes), ffmpeg, Qt for Python. Each is used under its own licence; "
+                            "models are downloaded from their authors' pages when first needed.",
+                            muted=True, wrap=True))
+        lay.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(w)
+        return scroll
+
+    def _check_encoders(self):
+        from ..steps import export as ex
+        self.a_enc_state.setText("Checking…")
+        self.repaint()
+        ok = ex.detect_encoders(refresh=True)
+        names = [n for e, _c, n in ex.ENCODERS if ok.get(e)]
+        self.a_enc_state.setText("Works here: " + ", ".join(names) if names else "No encoder works: is ffmpeg there?")
+
+    def _store_advanced(self):
+        s = settings()
+        model, beam = self.a_model.currentData(), self.a_beam.value()
+        quality = s["whisper_quality"]
+        if model != s["whisper_model"] or beam != int(s["whisper_beam"]):
+            quality = "custom"
+        s.update(whisper_model=model, whisper_beam=beam, whisper_quality=quality,
+                 whisper_device=self.a_device.currentData(), whisper_vad=self.a_vad.isChecked(),
+                 whisper_filter=self.a_filt.isChecked(), sub_max_chars=self.a_chars.value(),
+                 sub_max_duration=self.a_dur.value(), ocr_fps=self.a_fps.value(), dub_max_speed=self.a_up.value(),
+                 dub_join=self.a_join.isChecked(), dub_sync_subs=self.a_sync.isChecked(),
+                 parallel_videos=self.a_lanes.currentData(),
+                 export_encoder=self.a_enc.currentData(), export_container=self.a_cont.currentData(),
+                 translate_fallback=self.fallback.isChecked())
+
+    def _store_keys(self):
+        settings().update(gemini_key=self.g_key.text().strip(), gemini_model=self.g_model.currentText().strip(),
+                          cloudflare_account=self.c_acc.text().strip(), cloudflare_token=self.c_tok.text().strip(),
+                          cloudflare_model=self.c_model.currentText().strip())
+
+    def _test(self, which):
+        self._store_keys()
+        lab = {"gemini": "g", "cloudflare": "c", "google": "go"}[which]
+        getattr(self, f"{lab}_state").setText("Testing…")
+
+        def work():
+            if which == "google":
+                from ..translate import google
+                ok, msg = google.test(settings()["target_lang"])
+            else:
+                ok, msg = ai.test(which)
+            self.sig.result.emit(lab, ("OK. " if ok else "Failed: ") + msg)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _result(self, lab, text):
+        getattr(self, f"{lab}_state").setText(text)
+
+    # ------------------------------------------------------------ helpers
+    def _browse_root(self):
+        d = QFileDialog.getExistingDirectory(self, "Folder for the results", self.root.text())
+        if d:
+            self.root.setText(os.path.normpath(d))
+            self.r_custom.setChecked(True)
+
+    def _browse_ff(self):
+        d = QFileDialog.getExistingDirectory(self, "Folder that has ffmpeg.exe", self.ff.text())
+        if d:
+            self.ff.setText(os.path.normpath(d))
+            self._test_ff()
+
+    def _test_ff(self):
+        old = settings().data.get("ffmpeg_path", "")
+        settings().data["ffmpeg_path"] = self.ff.text().strip()
+        try:
+            exe = ffmpeg.find("ffmpeg")
+            if exe and ffmpeg.find("ffprobe"):
+                self.ff_state.setText(f"Found: {ffmpeg.version() or exe}")
+            else:
+                self.ff_state.setText("Not found. Run setup.bat, or choose the folder with ffmpeg.exe and ffprobe.exe.")
+        finally:
+            settings().data["ffmpeg_path"] = old
+
+    def _open(self, path):
+        os.makedirs(path, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _ok(self):
+        root = self.root.text().strip()
+        custom = self.r_custom.isChecked()
+        if custom and not root:
+            self.root.setFocus()
+            return
+        if custom:
+            try:
+                os.makedirs(root, exist_ok=True)
+            except OSError as e:
+                self.ff_state.setText(f"Cannot use that folder: {e}")
+                return
+        self._store_keys()
+        self._store_advanced()
+        old_lang = ui_language()
+        settings().update(native_titlebar=self.native_bar.isChecked(), language=self.lang.currentData())
+        if ui_language() != old_lang:
+            self.restart = QMessageBox.question(self, "FreeSub", "Restart FreeSub now to use the new language?") \
+                == QMessageBox.Yes
+        settings().update(theme=self.theme.currentData(), output_location="custom" if custom else "video",
+                          output_root=root, ffmpeg_path=self.ff.text().strip())
+        self.accept()

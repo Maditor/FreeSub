@@ -1,0 +1,30 @@
+# FreeSub - Windows 64-bit, Python 3.11 / 3.12. Installed by setup.bat.
+PySide6>=6.7,<6.10
+numpy>=1.26,<3
+requests>=2.31
+# faster-whisper itself is installed with --no-deps by setup.bat (it would pull plain onnxruntime,
+# which clashes with onnxruntime-directml). Its real dependencies:
+ctranslate2>=4.5,<5
+tokenizers>=0.13,<1
+huggingface_hub>=0.21
+av>=11
+tqdm
+# ONNX Runtime with DirectML: Whisper's VAD now, local OCR (any DX12 GPU) later
+onnxruntime-directml>=1.18
+# CUDA 12 + cuDNN 9 for Whisper on NVIDIA cards (pip wheels, no CUDA install needed)
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
+# Voices: Microsoft Edge online voices; Piper (offline) is installed with --no-deps by setup.bat
+edge-tts>=7.0
+pathvalidate>=3
+# OCR for burned-in subtitles: RapidOCR (installed with --no-deps by setup.bat) and its real dependencies
+opencv-python-headless>=4.8
+Pillow>=10
+pyclipper>=1.2
+shapely>=1.7.1,!=2.0.4
+PyYAML
+omegaconf
+colorlog
+jaconv>=0.3
+six
+vig2p>=0.1.2            # Vietnamese text -> phonemes for the optional Kokoro voices (Apache-2.0)
