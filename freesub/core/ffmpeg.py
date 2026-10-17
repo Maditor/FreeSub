@@ -2,12 +2,13 @@
 import json
 import logging
 import os
+import sys
 import re
 import shutil
 import subprocess
 import threading
 
-from ..config import app_dir, settings
+from ..config import app_dir, data_dir, settings
 from .jobs import Cancelled
 
 log = logging.getLogger(__name__)
@@ -32,8 +33,8 @@ def find(tool: str = "ffmpeg") -> str | None:
     if custom:
         folder = custom if os.path.isdir(custom) else os.path.dirname(custom)
         cands += [os.path.join(folder, _exe(tool)), os.path.join(folder, "bin", _exe(tool))]
-    here = app_dir()
-    cands += [os.path.join(here, "ffmpeg", "bin", _exe(tool)), os.path.join(here, "ffmpeg", _exe(tool))]
+    for here in (app_dir(), data_dir()):
+        cands += [os.path.join(here, "ffmpeg", "bin", _exe(tool)), os.path.join(here, "ffmpeg", _exe(tool))]
     for c in cands:
         if os.path.isfile(c):
             return c
@@ -58,7 +59,9 @@ def version() -> str:
 
 class FFmpegMissing(RuntimeError):
     def __init__(self):
-        super().__init__("ffmpeg not found. Run setup.bat (it downloads ffmpeg) or set its folder in Settings.")
+        super().__init__("ffmpeg not found. Open FreeSub again to download it, or set its folder in Settings."
+                         if getattr(sys, "frozen", False) else
+                         "ffmpeg not found. Run setup.bat (it downloads ffmpeg) or set its folder in Settings.")
 
 
 def probe(path: str) -> dict:

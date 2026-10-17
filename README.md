@@ -34,6 +34,11 @@ Bị dừng giữa chừng thì lần sau làm tiếp từ chỗ dừng. Sửa p
 | Ctrl + lăn chuột | Phóng to / thu nhỏ video |
 | Ctrl+E | Xuất |
 
+Bản exe (trang Releases): giải nén rồi chạy `FreeSub.exe`, không cần cài Python. Lần đầu app hỏi tải ffmpeg.
+Piper và hỗ trợ GPU NVIDIA chỉ tải khi bạn bấm nút tải trong app.
+
+Tự đóng gói exe: chạy `setup.bat` một lần, rồi `build.bat`. Kết quả nằm trong `dist\`.
+
 ## Dữ liệu
 
 - Kết quả: thư mục `freesub_<tên video>` cạnh video (đổi được trong Cài đặt).

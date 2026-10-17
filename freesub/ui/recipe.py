@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QLa
                                QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from ..config import settings
-from ..core import gpu
+from ..core import addons, gpu
 from ..langs import LANGS
 from ..tts import voices
 from .panels.voice import DictionaryDialog, Speaker
@@ -406,8 +406,9 @@ class Recipe(QWidget):
         if named:
             self._fill_voices(eng)
         if eng == "piper":
-            need = not voices.piper_ready("vi")
-            self.b_piper.setText("Download the Piper voice (63 MB)")
+            engine_missing = not voices.piper_installed() and addons.can_download()
+            need = engine_missing or not voices.piper_ready("vi")
+            self.b_piper.setText("Download Piper (100 MB)" if engine_missing else "Download the Piper voice (63 MB)")
         elif eng == "kokoro":
             need = not kokoro.ready()
             self.b_piper.setText(f"Download the Kokoro voices ({kokoro.SIZE})")
@@ -473,5 +474,7 @@ def gpu_summary() -> str:
     if n:
         return f"GPU: {name or 'NVIDIA'} (CUDA)"
     if name:
+        if addons.can_download():
+            return f"Found {name}. Speech recognition uses the CPU until GPU support is downloaded (Settings → Downloads)."
         return f"Found {name}, but the CUDA libraries are missing: run setup.bat again. Using the CPU."
     return "No NVIDIA GPU found: Whisper runs on the CPU."

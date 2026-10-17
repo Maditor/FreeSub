@@ -1,4 +1,4 @@
-"""Settings stored in Documents\\FreeSub Data\\settings.json (with the logs and the editable language files)."""
+"""Settings stored in Documents\\FreeSub Data\\settings.json (with the logs)."""
 import contextlib
 import json
 import os
@@ -6,7 +6,19 @@ import sys
 import threading
 
 APP_NAME = "FreeSub"
-APP_VERSION = "0.10.31"
+
+
+def _version() -> str:
+    """The version is kept in one place: the VERSION file (build.bat asks for it before each build)."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        with open(os.path.join(base, "VERSION"), encoding="utf-8") as f:
+            return f.read().strip() or "1.0.0"
+    except OSError:
+        return "1.0.0"
+
+
+APP_VERSION = _version()
 APP_URL = "https://github.com/Maditor/FreeSub"
 
 
@@ -82,7 +94,8 @@ DEFAULTS = {
     "output_root": "",
     "ffmpeg_path": "",              # empty = ffmpeg\bin next to the app, then PATH
     "window_geometry": "",
-    "native_titlebar": False,       # True = the usual Windows title bar instead of FreeSub's own
+    "native_titlebar": False,
+    "confirm_close": True,          # ask before the window closes (a click on X by mistake)       # True = the usual Windows title bar instead of FreeSub's own
     "window_state": "",
     "last_open_dir": "",
     "log_open": False,

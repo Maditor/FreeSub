@@ -1,6 +1,7 @@
 """Listening to a voice (Speaker) and the pronunciation dictionary window."""
 import logging
 import os
+import sys
 import tempfile
 import threading
 
@@ -58,7 +59,8 @@ class Speaker(QObject):
         self.n += 1
         if engine == "piper":
             if not voices.piper_installed():
-                self.state.emit("Piper is not installed: run setup.bat again.")
+                self.state.emit("Download Piper first." if getattr(sys, "frozen", False)
+                                else "Piper is not installed: run setup.bat again.")
                 return
             if not voices.piper_ready("vi"):
                 self.state.emit("Download the Vietnamese voice first.")

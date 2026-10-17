@@ -135,6 +135,11 @@ def main():
     ap.add_argument("--check", action="store_true", help="print what FreeSub can use (GPU, ffmpeg, models)")
     ap.add_argument("paths", nargs="*")
     args = ap.parse_args()
+    try:
+        from freesub.core import addons
+        addons.activate()                # Piper / GPU parts downloaded by the exe
+    except Exception:  # noqa: BLE001        (the app still runs; Piper / GPU are offered again)
+        pass
 
     if args.get_ffmpeg:
         from freesub.core import ffmpeg_setup
@@ -169,6 +174,13 @@ def main():
     from freesub.config import APP_NAME, settings, ui_language
 
     app = QApplication(sys.argv)
+    from freesub.ui import single
+    if single.hand_over(args.paths):     # FreeSub is open already: it shows itself and opens the paths
+        logging.getLogger("freesub").info("FreeSub is already open: handed over to it")
+        return
+    listener = single.Listener(app)
+    early = []                           # paths sent while this window is still loading
+    listener.wake.connect(early.extend)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("Maditor")
     app.setStyle("Fusion")
@@ -195,8 +207,16 @@ def main():
     if splash is not None:
         splash.finish(win)
     logging.getLogger("freesub").info("Window ready in %.1f s", time.perf_counter() - t0)
-    if args.paths:
-        win.source.add_paths(args.paths)
+    win._single = listener               # restart_app closes it so the new FreeSub can start
+
+    def wake(paths):
+        single.bring_to_front(win)
+        if paths:
+            win.open_videos(paths)
+    listener.wake.disconnect()
+    listener.wake.connect(wake)
+    if args.paths or early:
+        win.open_videos(list(args.paths) + early)
     sys.exit(app.exec())
 
 

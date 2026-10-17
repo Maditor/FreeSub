@@ -15,6 +15,7 @@ import threading
 import json
 import logging
 import os
+import sys
 import subprocess
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -82,7 +83,9 @@ class Voice:
         self.speed = int(s["tts_speed"])
         if self.engine == "piper":
             if not voices.piper_installed():
-                raise RuntimeError("Piper is not installed: run setup.bat again, or choose the Edge voice")
+                raise RuntimeError("Piper is not installed: press Download Piper in Narration, or choose the Edge voice"
+                                   if getattr(sys, "frozen", False) else
+                                   "Piper is not installed: run setup.bat again, or choose the Edge voice")
             if not voices.piper_ready("vi"):
                 raise RuntimeError("Download the Vietnamese Piper voice first (Voice section)")
         elif self.engine == "kokoro":

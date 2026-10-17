@@ -355,3 +355,85 @@ def delete_project(folder: str):
     """Forget a project: its work folder goes; the .srt files and exported videos are kept."""
     if os.path.dirname(os.path.abspath(folder)) == os.path.abspath(work_root()):
         shutil.rmtree(folder, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ the Trash: deleted projects, kept TRASH_DAYS
+TRASH_DAYS = 20
+TRASH_NOTE = "trashed.json"
+
+
+def trash_root() -> str:
+    path = os.path.join(data_dir(), "trash")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def trash_project(folder: str):
+    """Move a project to the Trash (its work folder, as it is). Gone for good after TRASH_DAYS."""
+    folder = os.path.abspath(folder)
+    if os.path.dirname(folder) != os.path.abspath(work_root()) or not os.path.isdir(folder):
+        return
+    name = os.path.basename(folder)
+    dest = os.path.join(trash_root(), f"{name}~{int(time.time())}")
+    for attempt in range(5):                     # a file still open for a moment (thumbnail, player)
+        try:
+            os.replace(folder, dest)
+            break
+        except OSError:
+            if attempt == 4:
+                shutil.copytree(folder, dest, dirs_exist_ok=True)
+                shutil.rmtree(folder, ignore_errors=True)
+            else:
+                time.sleep(0.3)
+    with open(os.path.join(dest, TRASH_NOTE), "w", encoding="utf-8") as f:
+        json.dump({"deleted": time.time(), "name": name}, f)
+
+
+def list_trash() -> list[dict]:
+    """Projects in the Trash, last deleted first: {folder, video, name, deleted, days_left, thumb}."""
+    out = []
+    root = trash_root()
+    for entry in os.listdir(root):
+        folder = os.path.join(root, entry)
+        note = _read_json(os.path.join(folder, TRASH_NOTE))
+        meta = _read_json(os.path.join(folder, "project.json"))
+        if not isinstance(note, dict):
+            continue
+        video = (meta or {}).get("video") or ""
+        deleted = float(note.get("deleted") or 0)
+        left = TRASH_DAYS - (time.time() - deleted) / 86400
+        thumb = os.path.join(folder, "thumb.jpg")
+        out.append({"folder": folder, "video": video, "name": os.path.basename(video) or entry,
+                    "deleted": deleted, "days_left": max(0, int(left + 0.999)),
+                    "thumb": thumb if os.path.isfile(thumb) else ""})
+    out.sort(key=lambda d: d["deleted"], reverse=True)
+    return out
+
+
+def restore_project(folder: str) -> str:
+    """Put a project back from the Trash. Raises FileExistsError when the video has a newer project."""
+    note = _read_json(os.path.join(folder, TRASH_NOTE)) or {}
+    name = note.get("name") or os.path.basename(folder).rsplit("~", 1)[0]
+    dest = os.path.join(work_root(), name)
+    if os.path.exists(dest):
+        raise FileExistsError(dest)
+    os.replace(folder, dest)
+    try:
+        os.remove(os.path.join(dest, TRASH_NOTE))
+    except OSError:
+        pass
+    return dest
+
+
+def purge_trash(everything: bool = False) -> int:
+    """Delete projects that have been in the Trash for TRASH_DAYS (or all of them). Returns how many."""
+    n = 0
+    root = trash_root()
+    for entry in os.listdir(root):
+        folder = os.path.join(root, entry)
+        note = _read_json(os.path.join(folder, TRASH_NOTE))
+        old = not isinstance(note, dict) or time.time() - float(note.get("deleted") or 0) > TRASH_DAYS * 86400
+        if everything or old:
+            shutil.rmtree(folder, ignore_errors=True)
+            n += 1
+    return n

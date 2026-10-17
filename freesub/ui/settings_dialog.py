@@ -1,17 +1,19 @@
 """Settings: General (look, output folder, ffmpeg), Translation (API keys, models, connection test) and
 Advanced (speech model and tuning, video encoder): things most people never change."""
 import os
+import sys
 import threading
 
 from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QFileDialog, QLineEdit, QMessageBox, QRadioButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout,
+                               QFileDialog, QLineEdit, QMessageBox, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout,
                                QWidget)
 
 from ..config import data_dir, logs_dir, models_dir, settings, ui_language, user_dir
 from ..i18n import LANGS, Keep
 from ..core import ffmpeg, models
+from ..core.jobs import Cancelled
 from ..translate import ai
 from .widgets import button, form_row, label, row, section
 
@@ -30,9 +32,10 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._general(), "General")
         tabs.addTab(self._translation(), "Translation")
+        tabs.addTab(self._downloads(), "Downloads")
         tabs.addTab(self._advanced(), "Advanced")
         tabs.addTab(self._about(), "About")
-        tabs.setCurrentIndex({"translation": 1, "advanced": 2, "about": 3}.get(tab, 0))
+        tabs.setCurrentIndex({"translation": 1, "downloads": 2, "advanced": 3, "about": 4}.get(tab, 0))
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self._ok)
         bb.rejected.connect(self.reject)
@@ -74,6 +77,9 @@ class SettingsDialog(QDialog):
         self.native_bar = QCheckBox("Use the Windows title bar (instead of FreeSub's own; after a restart)")
         self.native_bar.setChecked(bool(s["native_titlebar"]))
         lay.addWidget(self.native_bar)
+        self.ask_close = QCheckBox("Ask before closing FreeSub")
+        self.ask_close.setChecked(bool(s["confirm_close"]))
+        lay.addWidget(self.ask_close)
         lay.addSpacing(6)
         lay.addWidget(section("Where results go"))
         lay.addWidget(label("The .srt files and exported videos are saved here. Work files (audio, voice clips…) "
@@ -236,6 +242,206 @@ class SettingsDialog(QDialog):
         scroll.setWidget(w)
         return scroll
 
+    # ------------------------------------------------------------ Downloads
+    def _download_items(self):
+        """Everything FreeSub can download: (key, title, what it is for, size, ready(), download(control), remove)."""
+        from ..core import addons, ffmpeg_setup, gpu as gpu_mod
+        from ..steps import separate, speakers
+        from ..tts import kokoro, voices
+        frozen = addons.can_download()
+        items = [("ffmpeg", "ffmpeg", "Reads and makes the videos", "100 MB", ffmpeg.available,
+                  ffmpeg_setup.install, None)]
+        if frozen and gpu_mod.nvidia_name():
+            items.append(("gpu", "NVIDIA GPU support", "Speech recognition several times faster on this PC's "
+                          "NVIDIA card", addons.SIZES["gpu"], lambda: addons.installed("gpu"),
+                          lambda c: addons.install("gpu", c), None))
+        for name, (_repo, size, desc, _lang) in models.WHISPER.items():
+            items.append((f"whisper:{name}", f"Whisper {name}", desc[:1].upper() + desc[1:], size,
+                          lambda n=name: models.whisper_ready(n),
+                          lambda c, n=name: models.download_whisper(n, c),
+                          lambda n=name: models.remove_whisper(n)))
+        items.append(("separate", "Voice separation", "Sets the voice apart from the music (Best quality, "
+                      "narration over the original sound)", "64 MB", separate.model_ready, separate.download_model,
+                      None))
+        items.append(("speakers", "Speaker voices", "Tells the speakers apart (new line when the speaker changes)",
+                      speakers.MODEL["size"], speakers.model_ready, speakers.download_model, None))
+
+        def piper_ready():
+            return voices.piper_installed() and voices.piper_ready("vi")
+
+        def piper_get(c):
+            if not voices.piper_installed() and frozen:
+                addons.install("piper", c)
+            voices.piper_download("vi", c)
+        items.append(("piper", "Piper voice (Vietnamese)", "Offline narration voice",
+                      "100 MB" if frozen else "63 MB", piper_ready, piper_get, None))
+        items.append(("kokoro", "Kokoro voices (Vietnamese)", "Offline narration voices by a third party "
+                      "(see About)", kokoro.SIZE.replace("about ", ""), kokoro.ready, kokoro.download_all, None))
+        return items
+
+    def _downloads(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(6)
+        intro = label("Models and parts FreeSub downloads when they are first needed. Get them here ahead "
+                      "of time, or again after a failed download.", muted=True, wrap=True)
+        intro.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.b_all = button("Download all", self._download_all, primary=True)
+        lay.addWidget(row(intro, self.b_all))
+        lay.addSpacing(4)
+        self.dl_rows = {}
+        heads = {"ffmpeg": "Needed", "gpu": "Graphics card", "whisper:tiny": "Speech recognition (Whisper)",
+                 "separate": "Sound", "piper": "Narration voices"}
+        for key, title, desc, size, _ready, _get, remove in self._download_items():
+            if key in heads:
+                if key != "ffmpeg":
+                    lay.addSpacing(8)
+                lay.addWidget(section(heads[key]))
+            name = label(title)
+            name.setStyleSheet("font-weight: 600;")
+            info = label(f"{desc} · {size}", muted=True, wrap=True)
+            text = QWidget()
+            text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            tl = QVBoxLayout(text)
+            tl.setContentsMargins(0, 0, 0, 0)
+            tl.setSpacing(0)
+            tl.addWidget(name)
+            tl.addWidget(info)
+            state = label("", muted=True)
+            b_get = button("Download", lambda k=key: self._download(k))
+            b_del = button("Delete", lambda k=key: self._remove(k)) if remove else None
+            widgets = [text, state, b_get] + ([b_del] if b_del else [])
+            lay.addWidget(row(*widgets))
+            self.dl_rows[key] = (state, b_get, b_del)
+        lay.addStretch(1)
+        self._refresh_downloads()
+        runner = getattr(self.parent(), "runner", None)
+        if runner is not None:
+            runner.finished.connect(self._download_done)
+            self.finished.connect(lambda _r: runner.finished.disconnect(self._download_done))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(w)
+        return scroll
+
+    def _refresh_downloads(self):
+        runner = getattr(self.parent(), "runner", None)
+        busy = bool(runner and runner.busy)
+        for key, _t, _d, _s, ready, _g, _r in self._download_items():
+            if key not in self.dl_rows:
+                continue
+            state, b_get, b_del = self.dl_rows[key]
+            try:
+                ok = bool(ready())
+            except Exception:  # noqa: BLE001
+                ok = False
+            downloading = busy and (key == getattr(self, "_dl_key", None) or
+                                    (getattr(self, "_dl_key", None) == "*" and not ok))
+            state.setText("Downloading…" if downloading else "Downloaded" if ok else "")
+            b_get.setVisible(not ok and not downloading)
+            b_get.setEnabled(not busy)
+            if b_del is not None:
+                b_del.setVisible(ok and not busy)
+        if hasattr(self, "b_all"):
+            self.b_all.setEnabled(not busy and bool(self._missing()))
+
+    def _missing(self):
+        out = []
+        for item in self._download_items():
+            try:
+                ok = bool(item[4]())
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                out.append(item)
+        return out
+
+    @staticmethod
+    def _mb(size: str) -> float:
+        try:
+            n, unit = size.replace("about ", "").split()[:2]
+            return float(n) * (1000 if unit.upper().startswith("G") else 1)
+        except ValueError:
+            return 0.0
+
+    def _download_all(self):
+        runner = getattr(self.parent(), "runner", None)
+        todo = self._missing()
+        if runner is None or not todo:
+            return
+        if runner.busy:
+            QMessageBox.information(self, "FreeSub", "Wait for the current work to finish (or stop it) first.")
+            return
+        total = sum(self._mb(i[3]) for i in todo)
+        size = f"{total / 1000:.1f} GB" if total >= 1000 else f"{total:.0f} MB"
+        if QMessageBox.question(self, "FreeSub", f"Download everything that is missing?\n\n{len(todo)} items, "
+                                f"about {size}. This can take a long time.") != QMessageBox.Yes:
+            return
+        parent = self.parent()
+
+        def work(c):
+            failed = []
+            for key, title, _d, _s, _ready, get, _r in todo:
+                c.check()
+                try:
+                    get(c)
+                    if key == "gpu":
+                        from ..core import gpu as gpu_mod
+                        from .recipe import gpu_summary
+                        gpu_mod.reset()
+                        parent.sig.gpu_text.emit(gpu_summary())
+                except Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001     (one failure must not stop the rest)
+                    failed.append(f"{title}: {e}")
+            if failed:
+                raise RuntimeError("Not downloaded: " + "; ".join(failed))
+        self._dl_key = "*"
+        runner.run_task(work, "Downloading everything")
+        self._refresh_downloads()
+
+    def _download(self, key):
+        runner = getattr(self.parent(), "runner", None)
+        item = next((i for i in self._download_items() if i[0] == key), None)
+        if runner is None or item is None:
+            return
+        if runner.busy:
+            QMessageBox.information(self, "FreeSub", "Wait for the current work to finish (or stop it) first.")
+            return
+        _k, title, _d, _s, _ready, get, _r = item
+
+        def work(c):
+            get(c)
+            if key == "gpu":
+                from ..core import gpu as gpu_mod
+                from .recipe import gpu_summary
+                gpu_mod.reset()
+                self.parent().sig.gpu_text.emit(gpu_summary())
+        self._dl_key = key
+        runner.run_task(work, f"Downloading {title}")
+        self._refresh_downloads()
+
+    def _download_done(self, *_):
+        self._dl_key = None
+        self._refresh_downloads()
+        recipe = getattr(self.parent(), "recipe", None)
+        if recipe is not None:
+            recipe.refresh_voice()                  # the Piper / Kokoro download button there goes away
+
+    def _remove(self, key):
+        item = next((i for i in self._download_items() if i[0] == key), None)
+        if item is None or item[6] is None:
+            return
+        if QMessageBox.question(self, "FreeSub", f"Delete {item[1]} from this PC?\n"
+                                "It is downloaded again when it is needed.") != QMessageBox.Yes:
+            return
+        try:
+            item[6]()
+        except OSError as e:
+            QMessageBox.warning(self, "FreeSub", str(e))
+        self._refresh_downloads()
+
     # ------------------------------------------------------------ About
     def _about(self):
         from ..config import APP_NAME, APP_URL, APP_VERSION
@@ -348,7 +554,9 @@ class SettingsDialog(QDialog):
             if exe and ffmpeg.find("ffprobe"):
                 self.ff_state.setText(f"Found: {ffmpeg.version() or exe}")
             else:
-                self.ff_state.setText("Not found. Run setup.bat, or choose the folder with ffmpeg.exe and ffprobe.exe.")
+                self.ff_state.setText("Not found. Choose the folder with ffmpeg.exe and ffprobe.exe, or "
+                                      "open FreeSub again to download it." if getattr(sys, "frozen", False) else
+                                      "Not found. Run setup.bat, or choose the folder with ffmpeg.exe and ffprobe.exe.")
         finally:
             settings().data["ffmpeg_path"] = old
 
@@ -371,7 +579,8 @@ class SettingsDialog(QDialog):
         self._store_keys()
         self._store_advanced()
         old_lang = ui_language()
-        settings().update(native_titlebar=self.native_bar.isChecked(), language=self.lang.currentData())
+        settings().update(native_titlebar=self.native_bar.isChecked(), language=self.lang.currentData(),
+                          confirm_close=self.ask_close.isChecked())
         if ui_language() != old_lang:
             self.restart = QMessageBox.question(self, "FreeSub", "Restart FreeSub now to use the new language?") \
                 == QMessageBox.Yes

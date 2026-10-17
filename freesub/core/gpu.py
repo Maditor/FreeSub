@@ -8,6 +8,8 @@ import sys
 log = logging.getLogger(__name__)
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 _CACHE = {}
+EXTRA_BASES: list[str] = []          # downloaded add-on folders (core.addons) that hold nvidia/<lib>/bin
+CUDA_SUBS = ("nvidia/cublas/bin", "nvidia/cudnn/bin", "nvidia/cuda_runtime/bin", "nvidia/cuda_nvrtc/bin")
 
 
 def add_cuda_dll_paths():
@@ -16,7 +18,7 @@ def add_cuda_dll_paths():
         return
     _CACHE["dll"] = True
     import site
-    bases = []
+    bases = list(EXTRA_BASES)
     if getattr(sys, "_MEIPASS", None):
         bases.append(sys._MEIPASS)
     try:
@@ -25,7 +27,7 @@ def add_cuda_dll_paths():
     except Exception:  # noqa: BLE001
         pass
     for base in bases:
-        for sub in ("nvidia/cublas/bin", "nvidia/cudnn/bin", "nvidia/cuda_runtime/bin", "nvidia/cuda_nvrtc/bin"):
+        for sub in CUDA_SUBS:
             p = os.path.join(base, sub)
             if os.path.isdir(p):
                 try:
@@ -35,8 +37,27 @@ def add_cuda_dll_paths():
                     pass
 
 
+def reset():
+    """After the GPU add-on is downloaded: look again."""
+    _CACHE.clear()
+
+
+def cuda_libs_found() -> bool:
+    """cuBLAS and cuDNN are there (the exe has them only after the GPU download)."""
+    if not getattr(sys, "frozen", False):
+        return True                        # source run: setup.bat installed them, ctranslate2 tells
+    for base in EXTRA_BASES + [getattr(sys, "_MEIPASS", "")]:
+        if base and os.path.isfile(os.path.join(base, "nvidia", "cublas", "bin", "cublas64_12.dll")) and \
+                os.path.isdir(os.path.join(base, "nvidia", "cudnn", "bin")):
+            return True
+    return False
+
+
 def cuda_count() -> int:
     if "count" not in _CACHE:
+        if not cuda_libs_found():
+            _CACHE["count"] = 0
+            return 0
         try:
             add_cuda_dll_paths()
             import ctranslate2

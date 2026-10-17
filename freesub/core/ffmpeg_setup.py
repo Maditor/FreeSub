@@ -10,7 +10,7 @@ import sys
 import tempfile
 import zipfile
 
-from ..config import app_dir
+from ..config import app_dir, data_dir
 from .jobs import Control
 from .models import download
 
@@ -23,8 +23,16 @@ SOURCES = [
 WANT = ("ffmpeg.exe", "ffprobe.exe")
 
 
+def target_dir() -> str:
+    """ffmpeg next to the app for a source run (setup.bat); for the exe in %LOCALAPPDATA%\\FreeSub, so the
+    app folder can stay read-only (e.g. in Program Files) and an update of the exe keeps ffmpeg."""
+    if getattr(sys, "frozen", False):
+        return os.path.join(data_dir(), "ffmpeg")
+    return os.path.join(app_dir(), "ffmpeg")
+
+
 def install(control=None) -> str:
-    dest = os.path.join(app_dir(), "ffmpeg")
+    dest = target_dir()
     bin_dir = os.path.join(dest, "bin")
     if all(os.path.isfile(os.path.join(bin_dir, f)) for f in WANT):
         return bin_dir

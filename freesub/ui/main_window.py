@@ -7,7 +7,7 @@ import threading
 from PySide6.QtCore import QByteArray, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QMediaPlayer
-from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QMessageBox, QPlainTextEdit, QScrollArea, QSplitter, QStackedWidget, QTableWidget, QTabWidget,
                                QVBoxLayout, QWidget)
 
@@ -341,7 +341,10 @@ class MainWindow(QMainWindow):
     def show_home(self):
         self.preview.pause()
         self.editor._flush()
-        self.home.refresh()
+        if self.home.in_trash:
+            self.home.b_trash.setChecked(False)      # Projects button: out of the Trash (refreshes)
+        else:
+            self.home.refresh()
         self.pages.setCurrentIndex(0)
         self._run_buttons(False)
         self.b_home.setChecked(False)
@@ -416,6 +419,10 @@ class MainWindow(QMainWindow):
             self.show_work()
 
     def _project_deleted(self, video):
+        if video == self.queue.current():          # let go of its files, so the folder can move to the Trash
+            self._live_off()
+            self.preview.mix.clear()
+            self.preview.load("")
         for i in range(self.queue.list.count()):
             if self.queue.list.item(i).data(Qt.UserRole) == video:
                 self.queue.list.takeItem(i)
@@ -486,8 +493,7 @@ class MainWindow(QMainWindow):
         if pv.mix.ready() and p.is_done("dub", dub.MIX) and dub.track_fresh(p):
             pv.mix.set_enabled(True)                            # made already: the full mix
             return
-        if not ffmpeg.available():
-            QMessageBox.warning(self, APP_NAME, str(ffmpeg.FFmpegMissing()))
+        if not self.get_ffmpeg():
             off()
             return
         self.editor._flush()
@@ -530,8 +536,7 @@ class MainWindow(QMainWindow):
         v = self.queue.current()
         if not v or self.runner.busy:
             return
-        if not ffmpeg.available():
-            QMessageBox.warning(self, APP_NAME, str(ffmpeg.FFmpegMissing()))
+        if not self.get_ffmpeg():
             return
         pv = self.preview
         self.editor._flush()
@@ -723,8 +728,7 @@ class MainWindow(QMainWindow):
         if s["subs_source"] == "ocr" and s["do_subtitles"] and not (p.meta.get("ocr_region") or s["ocr_region"]):
             QMessageBox.information(self, APP_NAME, "Draw the subtitle area on the video first.")
             return
-        if not ffmpeg.available():
-            QMessageBox.warning(self, APP_NAME, str(ffmpeg.FFmpegMissing()))
+        if not self.get_ffmpeg():
             return
         self.editor._flush()
         p = Project(v)
@@ -778,8 +782,7 @@ class MainWindow(QMainWindow):
     def start(self, kind, videos=None):
         """kind: 'export' = the whole recipe, 'subs' = only up to the translated .srt files. videos: the batch's
         ticked videos (None = the videos selected in the list)."""
-        if not ffmpeg.available():
-            QMessageBox.warning(self, APP_NAME, str(ffmpeg.FFmpegMissing()))
+        if not self.get_ffmpeg():
             return
         s = settings()
         if videos is None:
@@ -814,13 +817,36 @@ class MainWindow(QMainWindow):
     def download_model(self, name):
         self.runner.run_task(lambda c: models.download_whisper(name, c), f"Downloading Whisper {name}")
 
+    def get_ffmpeg(self) -> bool:
+        """ffmpeg is missing: offer the download (exe) or say how to get it (source run). True = it is there."""
+        if ffmpeg.available():
+            return True
+        import sys
+        if not getattr(sys, "frozen", False):
+            QMessageBox.warning(self, APP_NAME, str(ffmpeg.FFmpegMissing()))
+            return False
+        if self.runner.busy:
+            return False
+        if QMessageBox.question(self, APP_NAME, "FreeSub needs ffmpeg to read and make videos (about 100 MB, "
+                                "downloaded once). Download it now?") == QMessageBox.Yes:
+            from ..core import ffmpeg_setup
+            self.runner.run_task(ffmpeg_setup.install, "Downloading ffmpeg")
+        return False
+
     def download_voice(self):
         if settings()["tts_engine"] == "kokoro":
             from ..tts import kokoro
             self.runner.run_task(kokoro.download_all, "Downloading the Kokoro voices")
             return
+        from ..core import addons
         from ..tts import voices
-        self.runner.run_task(lambda c: voices.piper_download("vi", c), "Downloading the Vietnamese voice")
+
+        def work(c):
+            if not voices.piper_installed() and addons.can_download():
+                addons.install("piper", c)
+            if not voices.piper_ready("vi"):
+                voices.piper_download("vi", c)
+        self.runner.run_task(work, "Downloading the Piper voice")
 
     def on_video_finished(self, video, result):
         self.queue.update_item(video=video)
@@ -872,9 +898,13 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ startup / shortcuts / drop
     def _startup_checks(self):
+        import sys
         if not ffmpeg.available():
-            log.warning("ffmpeg not found: run setup.bat or set its folder in Settings")
-            self.progress.text.setText("ffmpeg not found: run setup.bat, or set its folder in Settings.")
+            log.warning("ffmpeg not found")
+            if getattr(sys, "frozen", False):
+                self.get_ffmpeg()
+            else:
+                self.progress.text.setText("ffmpeg not found: run setup.bat, or set its folder in Settings.")
         self.recipe.set_gpu_text("Checking the graphics card…")
 
         def work():
@@ -887,6 +917,8 @@ class MainWindow(QMainWindow):
     def _gpu_text(self, text):
         self.recipe.set_gpu_text(text)
         log.info(text)
+        if "GPU support is downloaded" in text and not self.runner.busy:
+            self.progress.text.setText(text)
 
     def _typing(self):
         w = QApplication.focusWidget()
@@ -971,6 +1003,8 @@ class MainWindow(QMainWindow):
         import sys
         from PySide6.QtCore import QProcess
         args = [] if getattr(sys, "frozen", False) else [os.path.abspath(sys.argv[0])]   # the exe, or python main.py
+        if getattr(self, "_single", None) is not None:
+            self._single.close()                     # or the new FreeSub would hand over to this one and quit
         QProcess.startDetached(sys.executable, args)
 
     def closeEvent(self, e):
@@ -983,6 +1017,17 @@ class MainWindow(QMainWindow):
             self.runner.stop()
             if self.runner.thread:
                 self.runner.thread.join(timeout=5)
+        elif settings()["confirm_close"] and not getattr(self, "_restart", False):
+            box = QMessageBox(QMessageBox.Question, APP_NAME, "Close FreeSub?",
+                              QMessageBox.Yes | QMessageBox.No, self)
+            box.setDefaultButton(QMessageBox.No)
+            again = QCheckBox("Don't ask again")
+            box.setCheckBox(again)
+            if box.exec() != QMessageBox.Yes:
+                e.ignore()
+                return
+            if again.isChecked():
+                settings().update(confirm_close=False)
         self.proxies.stop_all()
         self.editor._flush()
         self.preview.player.stop()
