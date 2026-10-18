@@ -57,8 +57,12 @@ class Editor(QWidget):
                                    QAbstractItemView.AnyKeyPressed)
         self.table.setWordWrap(False)
         h = self.table.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        # the time columns have a fixed width (always the same format): "fit the contents" measured every row
+        # again on each row added, so thousands of lines froze the window
+        time_w = self.table.fontMetrics().horizontalAdvance("00:00:00.000") + 22
+        for col in (0, 1):
+            h.setSectionResizeMode(col, QHeaderView.Fixed)
+            self.table.setColumnWidth(col, time_w)
         h.setSectionResizeMode(C_VOICE, QHeaderView.Fixed)
         self.table.setColumnWidth(C_VOICE, 52)
         self.table.horizontalHeaderItem(C_VOICE).setToolTip(
@@ -185,6 +189,7 @@ class Editor(QWidget):
         if getattr(self, "_fit_job", None):              # lines being fitted: keep what is done so far
             self._save()
         self._flush()
+        self._undo, self._redo = [], []                  # undo is for this video's lines
         self.project = Project(video) if video else None
         self.src = load_srt(self.project.src_srt) if self.project and self.project.has(SRC_SRT) else []
         tr = load_srt(self.project.tr_srt) if self.project and self.project.has(TR_SRT) else []
@@ -369,9 +374,55 @@ class Editor(QWidget):
             self._learn_again = False
             self._learn()
 
+    # ------------------------------------------------------------ undo / redo (Ctrl+Z / Ctrl+Shift+Z)
+    def _snap(self):
+        return ([(c.start, c.end, c.text) for c in self.src], [(c.start, c.end, c.text) for c in self.tr])
+
+    def _remember(self, label: str):
+        """Before a change: the lines as they are now can be brought back."""
+        if not hasattr(self, "_undo"):
+            self._undo, self._redo = [], []
+        self._undo.append((label, self._snap()))
+        del self._undo[:-100]
+        self._redo.clear()
+
+    def _restore(self, snap):
+        src, tr_ = snap
+        self.src = [Cue(a, b, t) for a, b, t in src]
+        self.tr = [Cue(a, b, t) for a, b, t in tr_]
+        self._dirty.update({"src", "tr"} if self.tr else {"src"})
+        row_, bar = self.table.currentRow(), self.table.verticalScrollBar().value()
+        self._fill()
+        if 0 <= row_ < self.table.rowCount():
+            self.table.blockSignals(True)
+            self.table.setCurrentCell(row_, max(0, self.table.currentColumn()))
+            self.table.blockSignals(False)
+        self.table.verticalScrollBar().setValue(bar)
+        self._save()
+        self.cues_changed.emit()
+
+    def undo(self) -> bool:
+        if getattr(self, "_fit_job", None) or not getattr(self, "_undo", None):
+            return False
+        label, snap = self._undo.pop()
+        self._redo.append((label, self._snap()))
+        self._restore(snap)
+        self.count.setText(self.count.text() + tr(" · undone: {a}").replace("{a}", tr(label)))
+        return True
+
+    def redo(self) -> bool:
+        if getattr(self, "_fit_job", None) or not getattr(self, "_redo", None):
+            return False
+        label, snap = self._redo.pop()
+        self._undo.append((label, self._snap()))
+        self._restore(snap)
+        self.count.setText(self.count.text() + tr(" · redone: {a}").replace("{a}", tr(label)))
+        return True
+
     def _edited(self, item):
         self._hl = None
         r, c = item.row(), item.column()
+        self._remember("line edit")                     # self.src / self.tr are not changed yet
         text = item.text().replace(" / ", "\n").strip()
         try:
             if c in (0, 1):
@@ -478,6 +529,7 @@ class Editor(QWidget):
         where = "the box" if region else "the video width"
         work = [(c, "src", i, C_SRC) for i, c in enumerate(self.src)] + \
                [(c, "tr", i, C_TR) for i, c in enumerate(self.tr)]
+        self._remember("fit the lines")                 # all of it can be undone at once
         job = {"i": 0, "changed": 0, "project": p, "base": self.count.text()}
         self._fit_job = job
         self.b_fit.setEnabled(False)

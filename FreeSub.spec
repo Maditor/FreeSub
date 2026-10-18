@@ -16,7 +16,7 @@ datas = [
 lock = os.path.join(ROOT, "freesub", "addons_lock.json")
 if os.path.isfile(lock):
     datas.append((lock, "freesub"))
-for pkg in ("faster_whisper", "rapidocr", "vig2p", "jaconv"):
+for pkg in ("faster_whisper", "rapidocr", "vig2p", "sea_g2p", "jaconv"):    # sea_g2p: its dictionary (.bin)
     try:
         datas += collect_data_files(pkg, excludes=["**/pytorch/**", "**/paddle/**", "**/__pycache__/**"])
     except Exception:
@@ -29,7 +29,7 @@ for pkg in ("ctranslate2", "onnxruntime"):
 # RapidOCR picks its engine by name at run time: only the ONNX Runtime one is used
 hidden = collect_submodules("rapidocr", filter=lambda m: not any(
     x in m for x in ("pytorch", "paddle", "openvino", "tensorrt", "mnn")))
-hidden += collect_submodules("vig2p") + collect_submodules("edge_tts")
+hidden += collect_submodules("vig2p") + collect_submodules("edge_tts") + collect_submodules("sea_g2p")
 
 EXCLUDES = [
     "piper", "nvidia",                                   # add-ons, see above

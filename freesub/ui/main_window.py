@@ -934,18 +934,42 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ the timeline
     def _timeline_mode(self, on):
         """The timeline button on the video: the timeline takes the place of the subtitle table (taller)."""
+        # the subtitle table and the timeline take turns under the video: the one shown gets the height the
+        # other had (they look like one panel that changes what it shows)
         if on:
+            h = self.editor_panel.height() if self.editor_panel.isVisible() else 0
             self.editor_panel.setVisible(False)
             self.timeline_panel.setVisible(True)
-            if not getattr(self, "_tl_sized", False):        # first time: a third of the height
-                self._tl_sized = True
-                h = self.split_center.height()
-                QTimer.singleShot(0, lambda: self.split_center.setSizes([h * 2 // 3, max(170, h // 3)]))
+            QTimer.singleShot(0, self._tl_from_player)         # the timeline opens where the video is
+            h = h or max(170, self.split_center.height() // 3)
+            QTimer.singleShot(0, lambda: self.split_center.setSizes(        # after the layout has settled
+                [max(1, self.split_center.height() - h - self.split_center.handleWidth()), h]))
             self._tl_index = -1
         else:
+            h = self.timeline_panel.height() if self.timeline_panel.isVisible() else 0
             self.timeline.select(None)
             self.timeline_panel.setVisible(False)
             self.editor_panel.setVisible(True)
+            if h:
+                QTimer.singleShot(0, lambda: self.split_mid.setSizes(
+                    [max(1, self.split_mid.height() - h - self.split_mid.handleWidth()), h]))
+
+    def _tl_from_player(self):
+        """Switched to the timeline: its playhead goes to the moment the video is at (in the clip of this video
+        that holds that moment; nothing moves when no clip does). The video itself does not move."""
+        try:
+            tl = self.timeline.tl
+            v = self.preview.path
+            if not tl.clips or not v:
+                return
+            t = self.preview.player.position() / 1000
+            i = next((k for k, c in enumerate(tl.clips) if c["video"] == v and c["in"] <= t <= c["out"]), -1)
+            if i < 0:
+                return
+            self._tl_index = i
+            self.timeline.reveal(tl.to_timeline(i, t))
+        except Exception as e:  # noqa: BLE001        (never worth stopping the window for)
+            log.warning("Timeline: could not go to the video's moment: %s", e)
 
     def timeline_on(self) -> bool:
         return self.preview.b_timeline.isChecked()
@@ -1472,9 +1496,9 @@ class MainWindow(QMainWindow):
         sc(Qt.Key_W, lambda: tl.delete_side("right"), timeline=True)
         sc(Qt.Key_Delete, tl.delete_selected, lists_too=False, timeline=True)
         sc(Qt.Key_Backspace, tl.delete_selected, lists_too=False, timeline=True)
-        sc("Ctrl+Z", tl.undo, timeline=True)
-        sc("Ctrl+Shift+Z", tl.redo, timeline=True)
-        sc("Ctrl+Y", tl.redo, timeline=True)
+        sc("Ctrl+Z", lambda: tl.undo() if self.timeline_panel.isVisible() else self.editor.undo())
+        sc("Ctrl+Shift+Z", lambda: tl.redo() if self.timeline_panel.isVisible() else self.editor.redo())
+        sc("Ctrl+Y", lambda: tl.redo() if self.timeline_panel.isVisible() else self.editor.redo())
         sc("Ctrl+=", lambda: tl.zoom(1.25), timeline=True)
         sc("Ctrl++", lambda: tl.zoom(1.25), timeline=True)
         sc("Ctrl+-", lambda: tl.zoom(1 / 1.25), timeline=True)

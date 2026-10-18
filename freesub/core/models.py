@@ -90,11 +90,11 @@ def download_whisper(name: str, control=None):
                 continue
             raise
         done += size or os.path.getsize(target)
+    tok = os.path.join(dest, "tokenizer.json")
+    if not os.path.isfile(tok):                  # converted without one (PhoWhisper): the standard one, BEFORE
+        download(f"{HF}/{FALLBACK_TOKENIZER}/resolve/main/tokenizer.json", tok, control=control)    # the check
     if not whisper_ready(name):
         raise RuntimeError(f"Model {name} is incomplete after download")
-    tok = os.path.join(dest, "tokenizer.json")
-    if not os.path.isfile(tok):
-        download(f"{HF}/{FALLBACK_TOKENIZER}/resolve/main/tokenizer.json", tok, control=control)
     log.info("Whisper model %s ready in %s", name, dest)
 
 

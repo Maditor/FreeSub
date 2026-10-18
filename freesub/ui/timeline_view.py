@@ -787,6 +787,17 @@ class TimelineView(QWidget):
 
     HOLD = 3.0          # seconds after the user scrolled before the view follows the playhead again
 
+    def reveal(self, t):
+        """The playhead at t (timeline time), scrolled into sight if it is not (the view's own move)."""
+        self.playhead = max(0.0, min(t, self.tl.total()))
+        x = self.canvas.x_of(self.playhead)
+        w = self.canvas.width()
+        if x < 0 or x > w - 40:
+            self._auto = True
+            self.scroll.setValue(int(max(0.0, self.playhead * self.px - w * 0.3)))
+            self._auto = False
+        self.canvas.update()
+
     def _released(self):
         import time
         self._user_until = time.monotonic() + self.HOLD     # let go: a moment more to look before it follows
