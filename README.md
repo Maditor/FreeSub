@@ -2,6 +2,17 @@
 
 Tạo phụ đề, dịch và thuyết minh cho video. Miễn phí, mã nguồn mở (MIT), chạy trên Windows 10/11 64-bit.
 
+---
+<img width="1920" height="1080" alt="{A2E4E139-F04B-4368-9A95-ADB744FABA8F}" src="https://github.com/user-attachments/assets/f439783c-772b-4bd7-98fd-191cd715497a" />
+
+<img width="1920" height="1080" alt="{997061E2-595D-4997-A9F8-8E5BA9C8C871}" src="https://github.com/user-attachments/assets/ac22128c-2b42-44da-b57d-a77fd980624b" />
+
+<img width="1920" height="1080" alt="{113D3DD3-6D9A-4E88-829A-0E57F31BABC6}" src="https://github.com/user-attachments/assets/2988a136-4489-402f-869d-0ce4d0a3c011" />
+
+
+
+---
+
 ## Tính năng
 
 - **Phụ đề** từ giọng nói (Whisper) hoặc từ chữ có sẵn trên hình (OCR).
