@@ -192,6 +192,10 @@ class SettingsDialog(QDialog):
         lay.addWidget(section("Reading hard subtitles (OCR)"))
         self.a_fps = spin(0.5, 10, float(s["ocr_fps"]), 0.5, " frames per second", 1)
         lay.addWidget(form_row("Frames read", self.a_fps, "More = more exact timing, slower"))
+        self.a_thorough = QCheckBox("Read every frame (much slower; a little more exact when the picture behind "
+                                    "the subtitles is very busy)")
+        self.a_thorough.setChecked(bool(s["ocr_thorough"]))
+        lay.addWidget(self.a_thorough)
         lay.addSpacing(6)
         lay.addWidget(section("Batch"))
         self.a_lanes = combo([("auto", "Auto (two when this PC has room)"), ("1", "One at a time"),
@@ -492,7 +496,7 @@ class SettingsDialog(QDialog):
             quality = "custom"
         s.update(whisper_model=model, whisper_beam=beam, whisper_quality=quality,
                  whisper_device=self.a_device.currentData(), whisper_vad=self.a_vad.isChecked(),
-                 whisper_filter=self.a_filt.isChecked(), ocr_fps=self.a_fps.value(), dub_max_speed=self.a_up.value(),
+                 whisper_filter=self.a_filt.isChecked(), ocr_fps=self.a_fps.value(), ocr_thorough=self.a_thorough.isChecked(), dub_max_speed=self.a_up.value(),
                  dub_join=self.a_join.isChecked(), dub_sync_subs=self.a_sync.isChecked(),
                  parallel_videos=self.a_lanes.currentData(),
                  export_encoder=self.a_enc.currentData(), export_container=self.a_cont.currentData(),

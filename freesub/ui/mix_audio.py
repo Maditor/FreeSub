@@ -95,7 +95,7 @@ class MixAudio(QObject):
         lv = self.levels
         narr = stereo_slice(self.tracks.get("narr"), k, n)
         bg = stereo_slice(self.tracks.get("bg"), k, n)
-        g = duck_curve(self.spans, k, n, lv["duck"], int(RAMP * RATE))[:, None]
+        g = duck_curve(self.spans, k, n, lv["duck"], int(RAMP * RATE), ordered=True)[:, None]
         if self.has_voice:
             x = bg * lv["bg"] + stereo_slice(self.tracks.get("voice"), k, n) * (lv["voice"] * g)
         else:                                       # no separation: the whole original sound ducks

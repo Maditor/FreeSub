@@ -28,6 +28,7 @@ class Timeline(QSlider):
 
     def set_ready(self, spans):
         self.ready = list(spans or [])
+        self._band = None                   # drawn again once (a long video: thousands of parts)
         self.update()
 
     def _x(self, ms, left, width):
@@ -45,14 +46,32 @@ class Timeline(QSlider):
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(c["stroke_strong"]))
         p.drawRoundedRect(groove, 2, 2)
-        if self.ready:                                   # narration ready: a lighter accent band
-            col = QColor(c["accent"])
-            col.setAlpha(110)
-            p.setBrush(col)
-            for a, b in self.ready:
-                x0, x1 = self._x(a * 1000, left, width), self._x(b * 1000, left, width)
-                if x1 > x0:
-                    p.drawRoundedRect(QRectF(x0, cy - 3, x1 - x0, 6), 2, 2)
+        if self.ready:                                   # narration ready: a lighter accent band (kept as a
+            key = (self.width(), self.height(), self.minimum(), self.maximum(), c["accent"])   # picture: the
+            if getattr(self, "_band", None) is None or self._band[0] != key:                    # slider moves
+                from PySide6.QtGui import QPixmap                                               # 20× a second)
+                pm = QPixmap(self.size() * self.devicePixelRatioF())
+                pm.setDevicePixelRatio(self.devicePixelRatioF())
+                pm.fill(Qt.transparent)
+                q = QPainter(pm)
+                col = QColor(c["accent"])
+                col.setAlpha(110)
+                q.setPen(Qt.NoPen)
+                q.setBrush(col)
+                spans = []                               # parts closer than a pixel: one rectangle
+                for a, b in self.ready:
+                    x0, x1 = self._x(a * 1000, left, width), self._x(b * 1000, left, width)
+                    if x1 <= x0:
+                        continue
+                    if spans and x0 <= spans[-1][1] + 1:
+                        spans[-1][1] = max(spans[-1][1], x1)
+                    else:
+                        spans.append([x0, x1])
+                for x0, x1 in spans:
+                    q.drawRect(QRectF(x0, cy - 3, max(1.0, x1 - x0), 6))
+                q.end()
+                self._band = (key, pm)
+            p.drawPixmap(0, 0, self._band[1])
         x = self._x(self.value(), left, width)
         on = self.isEnabled()
         p.setBrush(QColor(c["accent"] if on else c["faint"]))

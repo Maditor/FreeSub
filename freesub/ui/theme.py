@@ -1,5 +1,6 @@
 """Light / dark theme: color tokens + one Qt stylesheet. 'system' follows Windows."""
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtWidgets import QScrollBar
 from PySide6.QtGui import QColor, QGuiApplication, QPalette
 
 # Layers from back to front, each a step apart so areas and controls can be told apart at a glance:
@@ -44,8 +45,39 @@ def applied(mode: str) -> bool:
     return _current.get("name") == ("dark" if dark else "light") and _current.get("done", False)
 
 
+class _ScrollHover(QObject):
+    """A scroll bar under the mouse gets wider (easier to grab): thin while just showing where you are."""
+
+    def eventFilter(self, obj, e):
+        if isinstance(obj, QScrollBar) and e.type() in (QEvent.Enter, QEvent.Leave):
+            hot = e.type() == QEvent.Enter
+            if obj.property("hot") != hot and not (not hot and obj.isSliderDown()):
+                obj.setProperty("hot", hot)
+                obj.style().unpolish(obj)
+                obj.style().polish(obj)
+                obj.update()
+        elif isinstance(obj, QScrollBar) and e.type() == QEvent.MouseButtonRelease and not obj.underMouse():
+            QTimer.singleShot(0, lambda o=obj: self._cool(o))    # let go outside it after dragging
+        return False
+
+    @staticmethod
+    def _cool(obj):
+        try:
+            obj.setProperty("hot", False)
+            obj.style().unpolish(obj)
+            obj.style().polish(obj)
+        except RuntimeError:
+            pass
+
+
+_HOVER = {}
+
+
 def apply(app, mode: str):
     """mode: system | light | dark."""
+    if "f" not in _HOVER:
+        _HOVER["f"] = _ScrollHover()
+        app.installEventFilter(_HOVER["f"])
     dark = system_is_dark() if mode == "system" else mode == "dark"
     c = DARK if dark else LIGHT
     _current.update(name="dark" if dark else "light", c=c)
@@ -209,11 +241,13 @@ QSlider::handle:horizontal:hover {{ background: {c['accent_hover']}; }}
 QProgressBar {{ background: {c['stroke_strong']}; border: none; border-radius: 1px; max-height: 3px; text-align: center; color: transparent; }}
 QProgressBar::chunk {{ background: {c['accent']}; border-radius: 1px; }}
 
-QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: {c['stroke_strong']}; border-radius: 3px; min-height: 30px; }}
-QScrollBar::handle:vertical:hover {{ background: {c['faint']}; }}
-QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 2px; }}
-QScrollBar::handle:horizontal {{ background: {c['stroke_strong']}; border-radius: 3px; min-width: 30px; }}
+QScrollBar:vertical {{ background: transparent; width: 14px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: {c['stroke_strong']}; border-radius: 3px; min-height: 30px; margin: 2px 4px; }}
+QScrollBar:horizontal {{ background: transparent; height: 14px; margin: 0; }}
+QScrollBar::handle:horizontal {{ background: {c['stroke_strong']}; border-radius: 3px; min-width: 30px; margin: 4px 2px; }}
+QScrollBar[hot="true"] {{ background: {c['hover']}; border-radius: 7px; }}
+QScrollBar[hot="true"]::handle:vertical {{ margin: 2px 2px; border-radius: 5px; background: {c['faint']}; }}
+QScrollBar[hot="true"]::handle:horizontal {{ margin: 2px 2px; border-radius: 5px; background: {c['faint']}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QScrollArea {{ background: transparent; border: none; }}

@@ -25,23 +25,42 @@ def _greedy(tokens, measure, limit):
     return lines
 
 
+def _greedy_w(full, bare, limit):
+    """_greedy on widths: full[i] = token i with its space, bare[i] = without. -> [(first, last+1)]"""
+    out, start, run = [], 0, 0.0
+    for i in range(len(full)):
+        if i > start and run + bare[i] > limit:
+            out.append((start, i))
+            start, run = i, 0.0
+        run += full[i]
+    out.append((start, len(full)))
+    return out
+
+
 def balanced(text: str, measure, n: int):
-    """Best split into at most n lines (the widest line as short as possible): (lines, widest)."""
+    """Best split into at most n lines (the widest line as short as possible): (lines, widest).
+    Each word is measured once (a line's width = its words' widths): long videos have thousands of lines."""
     tokens = _tokens(text)
     if not tokens:
         return [], 0.0
-    lo = max(measure(t.strip()) for t in tokens)
-    hi = measure("".join(tokens).strip())
+    full = [measure(t) for t in tokens]
+    bare = [measure(t.rstrip()) if t.endswith(" ") else w for t, w in zip(tokens, full)]
+
+    def width(a, b):
+        return sum(full[a:b - 1]) + bare[b - 1]
+    lo = max(bare)
+    hi = width(0, len(tokens))
     if n <= 1 or hi <= lo:
         return ["".join(tokens).strip()], hi
     for _ in range(18):                      # smallest width limit that still gives <= n lines
         mid = (lo + hi) / 2
-        if len(_greedy(tokens, measure, mid)) <= n:
+        if len(_greedy_w(full, bare, mid)) <= n:
             hi = mid
         else:
             lo = mid
-    lines = _greedy(tokens, measure, hi)
-    return lines, max(measure(l) for l in lines)
+    spans = _greedy_w(full, bare, hi)
+    lines = ["".join(tokens[a:b]).strip() for a, b in spans]
+    return lines, max(width(a, b) for a, b in spans)
 
 
 def _words_ok(lines, max_words: int) -> bool:

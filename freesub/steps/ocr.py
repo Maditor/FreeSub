@@ -1,7 +1,10 @@
 """Step: hard subtitles burned into the picture -> subs.src.srt.
 
-1. ffmpeg reads N frames per second, cropped to the subtitle area the user drew on the preview.
-2. A frame that looks like the previous one (same text) is not read again.
+1. ffmpeg reads N frames per second (with the graphics card's decoder when it can), cropped to the subtitle
+   area the user drew on the preview.
+2. Only the subtitle's own pixels are compared (bright letters with a dark edge around them): a frame with the
+   same letters as the last frame read is not read again, even when the picture behind them moves, and a
+   frame with no letters is not read at all.
 3. RapidOCR (PP-OCRv6, on this PC) reads the text; lines are joined top to bottom.
 4. Frames in a row with the same text become one subtitle line with its start / end time.
 A checkpoint (ocr.partial.json) lets a stopped run go on from where it ended.
@@ -132,6 +135,66 @@ def _norm(t: str) -> str:
     return re.sub(r"[\s\W_]+", "", t.lower())
 
 
+def text_mask(img_bgr):
+    """The subtitle's letters: bright pixels with a dark edge near them (outline, shadow or a dark box).
+    Half size: enough to compare, and quick."""
+    import cv2
+    g = cv2.cvtColor(img_bgr[::2, ::2], cv2.COLOR_BGR2GRAY)
+    bright = g >= 175
+    dark = (g <= 90).astype(np.uint8)
+    near = cv2.dilate(dark, np.ones((5, 5), np.uint8)) > 0
+    return bright & near
+
+
+class Changes:
+    """Decides whether a frame must be read: compared with the last frame that WAS read (no slow drift)."""
+    SAME = 0.35            # letters' pixels that may differ (the picture behind them moves) and still be the same
+
+    def __init__(self, check_every: int = 6):
+        self.ref_mask = None        # the letters of the last frame read
+        self.ref_small = None       # its picture (small), for subtitles without a dark edge
+        self.min_px = 0
+        self.quiet = False          # the last frame read had no text at all
+        self.check_every = check_every      # no letters seen: still read one frame in this many (letters
+        self._skipped = 0                   # without a dark edge are not missed)
+        self.last_small = None              # the frame before, and whether the picture was moving just
+        self.was_moving = False             # before this frame (letters coming make THIS frame differ)
+
+    def need_read(self, img) -> bool:
+        mask = text_mask(img)
+        small = img[::4, ::4].mean(axis=2)
+        moving = self.was_moving
+        self.was_moving = self.last_small is not None and self.last_small.shape == small.shape and \
+            np.abs(small - self.last_small).mean() >= 2.5
+        self.last_small = small
+        if self.ref_mask is None or mask.shape != self.ref_mask.shape:
+            return self._take(mask, small)
+        self.min_px = self.min_px or max(25, int(mask.size * 0.002))
+        n, n_ref = int(mask.sum()), int(self.ref_mask.sum())
+        if n < self.min_px and n_ref < self.min_px:
+            # no outlined letters, now or then: an empty strip (read now and then, in case), or letters without
+            # an edge (then the old way: the whole strip must look alike)
+            if np.abs(small - self.ref_small).mean() < 2.5:
+                return False
+            if self.quiet and moving:               # a busy picture behind: only now and then (a still
+                self._skipped += 1                  # picture that changes = letters came: read at once)
+                if self._skipped < self.check_every:
+                    return False
+            return self._take(mask, small)
+        if n < self.min_px or n_ref < self.min_px:
+            return self._take(mask, small)          # letters came or went
+        union = int((mask | self.ref_mask).sum())
+        diff = int((mask ^ self.ref_mask).sum()) / max(1, union)
+        if diff < self.SAME:
+            return False
+        return self._take(mask, small)
+
+    def _take(self, mask, small) -> bool:
+        self.ref_mask, self.ref_small = mask, small
+        self._skipped = 0
+        return True
+
+
 def same_text(a: str, b: str) -> bool:
     na, nb = _norm(a), _norm(b)
     if not na or not nb:
@@ -147,7 +210,8 @@ def build_cues(samples, step: float):
         t, text, score = smp
         if run and (t is None or not same_text(run[-1][1], text) or t - run[-1][0] > step * 1.6):
             if _norm(run[0][1]):
-                best = max(run, key=lambda r: (r[2], len(r[1])))
+                # the best reading: the surest, and of two about as sure the longer (a lone "I" is not lost)
+                best = max(run, key=lambda r: (round(r[2] * 20), len(r[1])))
                 cues.append(Cue(run[0][0], run[-1][0] + step, best[1]))
             run = []
         if t is not None:
@@ -171,6 +235,8 @@ def run(project: Project, control, force=False) -> str:
         raise RuntimeError("The OCR engine is not installed: run setup.bat again")
     fps = max(0.5, min(10.0, float(s["ocr_fps"])))
     params = {"region": [round(v, 4) for v in region], "fps": fps}
+    if s["ocr_thorough"]:
+        params["thorough"] = True
     if not force and project.is_done("ocr", SRC_SRT) and project.step("ocr").get("params") == params:
         project.ensure_published(SRC_SRT, project.meta.get("source_lang") or "")
         control.progress(1.0, "Hard subtitles already read")
@@ -244,33 +310,64 @@ def _read(project, control, x, y, w, h, ow, oh, fps, dur, start_at, samples, sav
     if not exe:
         raise ffmpeg.FFmpegMissing()
     vf = f"fps={fps},crop={w}:{h}:{x}:{y}" + (f",scale={ow}:{oh}" if (ow, oh) != (w, h) else "")
-    cmd = [exe, "-hide_banner", "-nostdin", "-loglevel", "error"]
-    if start_at > 0:
-        cmd += ["-ss", f"{start_at:.3f}"]
-    cmd += ["-i", project.video, "-an", "-sn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                         creationflags=0x08000000 if os.name == "nt" else 0)
+    def start(hw):
+        cmd = [exe, "-hide_banner", "-nostdin", "-loglevel", "error"]
+        if hw:
+            cmd += ["-hwaccel", "auto"]              # the graphics card decodes (much faster on long videos)
+        if start_at > 0:
+            cmd += ["-ss", f"{start_at:.3f}"]
+        cmd += ["-i", project.video, "-an", "-sn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
+        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                creationflags=0x08000000 if os.name == "nt" else 0)
     size = ow * oh * 3
+    p = start(True)
+    first = p.stdout.read(size)
+    if len(first) < size:                            # the card's decoder refused this file: the usual way
+        p.kill()
+        p.wait()
+        p = start(False)
+        first = p.stdout.read(size)
     step = 1.0 / fps
     min_score = float(settings()["ocr_min_score"])
-    prev_small, prev_text, prev_score = None, "", 0.0
+    changes = Changes(check_every=max(2, int(round(fps * 2))))
+    thorough = bool(settings()["ocr_thorough"])      # read every frame whose picture changed (slow, the old way)
+    prev_small = None
+    prev_text, prev_score = "", 0.0
+    run_reads, since = 0, 0              # readings of the line on screen, frames since the last one
     k, read_n, t0, last_save = 0, 0, time.time(), time.time()
     try:
         while True:
-            buf = p.stdout.read(size)
+            buf = first if k == 0 else p.stdout.read(size)
             if len(buf) < size:
                 break
             control.check()
             t = start_at + k * step
             k += 1
             img = np.frombuffer(buf, dtype=np.uint8).reshape(oh, ow, 3)
-            small = img[::4, ::4].mean(axis=2)
-            if prev_small is not None and np.abs(small - prev_small).mean() < 2.5:
-                text, score = prev_text, prev_score          # same picture in the strip: same text
+            if thorough:
+                small = img[::4, ::4].mean(axis=2)
+                new = prev_small is None or np.abs(small - prev_small).mean() >= 2.5
+                prev_small = small
             else:
+                new = k == 1 or changes.need_read(img)
+                if k == 1:
+                    changes.need_read(img)
+            since += 1
+            # the same line: read again while the reading is not sure (busy picture behind the letters), up to
+            # 5 readings spread over the line; the best one is kept
+            again = not new and prev_text and (run_reads < 3 or run_reads < 5 and prev_score < 0.97) and \
+                since >= (1 if run_reads == 1 else 2)
+            if new or again:
                 text, score = read_text(img, min_score)
+                changes.quiet = not text
                 read_n += 1
-            prev_small, prev_text, prev_score = small, text, score
+                run_reads = 1 if new else run_reads + 1
+                since = 0
+                if again and (round(score * 20), len(text)) < (round(prev_score * 20), len(prev_text)):
+                    text, score = prev_text, prev_score      # keep the better reading for this frame
+            else:
+                text, score = prev_text, prev_score          # the same letters (or none): the same text
+            prev_text, prev_score = text, score
             samples.append((round(t, 3), text, round(score, 3)))
             if dur:
                 speed = (t - start_at) / max(0.1, time.time() - t0)

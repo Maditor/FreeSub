@@ -54,7 +54,8 @@ class Speaker(QObject):
         engine = s.get("tts_engine", "edge")
         speed = int(s.get("tts_speed", 100))
         from ...tts.abbrev_vi import expand
-        text = expand(text)
+        from ...tts.numbers_vi import say as numbers
+        text = numbers(expand(text))                # read like the narration does: 3.000 -> ba nghìn
         spoken = pronouncer().respell_text(text)[0] if respell else text
         self.n += 1
         if engine == "piper":

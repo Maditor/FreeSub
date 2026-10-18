@@ -131,6 +131,7 @@ DEFAULTS = {
     "ocr_fps": 3.0,                 # frames read per second
     "ocr_region": None,             # [x, y, w, h] fractions of the frame: the subtitle area / box (last drawn)
     "ocr_min_score": 0.6,
+    "ocr_thorough": False,          # read every changed frame (the old, slow way) instead of each line a few times
     "sub_box": True,                # show the subtitles inside the drawn box (blurred, darker picture under it)
     "sub_box_always": False,        # keep the box on screen the whole video (not only while a line shows)
     "video_speed": 1.0,             # playback speed 0.25 - 2: the preview plays at it and the export is made at it

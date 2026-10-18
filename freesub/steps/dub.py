@@ -111,7 +111,8 @@ class Voice:
         """Make (or reuse) the clip for one line; returns its file."""
         if settings()["target_lang"] == "vi":
             from ..tts.abbrev_vi import expand
-            text = expand(text)                   # "v.v." -> "vân vân" (the subtitles keep it short)
+            from ..tts.numbers_vi import say
+            text = say(expand(text))              # "v.v." -> "vân vân", 3.000 -> "ba nghìn" (subtitles keep them)
         spoken = pronouncer().respell_text(text)[0] if self.respell else text
         spoken = " ".join(spoken.split())
         voice = self.voice_for(gender)
@@ -483,11 +484,22 @@ def preview_sources(project):
     return src, spans
 
 
-def duck_curve(spans, k, n, duck, ramp):
-    """Gain (n samples from sample k): 1 between lines, `duck` while a narration line plays, smooth ramps."""
+def duck_curve(spans, k, n, duck, ramp, ordered=False):
+    """Gain (n samples from sample k): 1 between lines, `duck` while a narration line plays, smooth ramps.
+    ordered: spans are sorted by start (the live preview: only the lines near k are looked at, a long video
+    has thousands and this runs many times a second)."""
     g = np.ones(n, dtype=np.float32)
     if duck >= 1.0:
         return g
+    if ordered and len(spans) > 32:
+        import bisect
+        first = max(0, bisect.bisect_left(spans, (k - ramp - 60 * 48000, 0)))     # no line is a minute long
+        near = []
+        for a, e in spans[first:]:
+            if a - ramp > k + n:
+                break
+            near.append((a, e))
+        spans = near
     for a, e in spans:
         if e + ramp < k or a - ramp > k + n:
             continue

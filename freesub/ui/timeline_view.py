@@ -39,6 +39,8 @@ class _Video:
         self.duration = duration or 0.0
         self.stamp = None
         self.cues = []                  # [(start, end, text, index)]
+        self.starts = []
+        self.text_of = {}
         self.spans = []
         self.thumb = None
         self.looks = {}
@@ -56,6 +58,9 @@ class _Video:
         self.stamp = stamp
         cues = load_srt(srt) if os.path.isfile(srt) else []
         self.cues = [(c.start, c.end, " ".join(c.text.split()), i) for i, c in enumerate(cues)]
+        self.cues.sort(key=lambda q: q[0])
+        self.starts = [q[0] for q in self.cues]                 # for finding the lines on screen quickly
+        self.text_of = {q[3]: q[2] for q in self.cues}
         try:
             from ..steps import dub
             self.spans = dub.placed_spans(p) if p.has("dub.json") else []
@@ -109,15 +114,28 @@ class _Canvas(QWidget):
         a = tl.start_of(i)
         return QRectF(self.x_of(a), VID_Y, Timeline.length(tl.clips[i]) * self.v.px, VID_H)
 
-    def cue_rects(self):
-        """[(rect, clip index, video, cue index, start, end)] of the lines that are inside their clip."""
+    def cue_rects(self, visible_only=True):
+        """[(rect, clip index, video, cue index, start, end)] of the lines that are inside their clip (and, by
+        default, on screen: a long video has thousands)."""
+        import bisect
         out = []
         tl = self.v.tl
+        t0, t1 = self.t_of(-20), self.t_of(self.width() + 20)
         for i, c in enumerate(tl.clips):
             info = self.v.video(c["video"])
             base = tl.start_of(i)
-            for (a, b, _text, k) in info.cues:
-                if b <= c["in"] or a >= c["out"]:
+            lo, hi = c["in"], c["out"]
+            if visible_only:                       # the part of this clip that is on screen, in its video's time
+                lo = max(lo, c["in"] + (t0 - base))
+                hi = min(hi, c["in"] + (t1 - base))
+                if hi <= lo:
+                    continue
+            starts = info.starts
+            j = max(0, bisect.bisect_left(starts, lo) - 3)      # a few before: lines that began earlier
+            for (a, b, _text, k) in info.cues[j:]:
+                if a >= hi:
+                    break
+                if b <= c["in"] or a >= c["out"] or b <= lo:
                     continue
                 a2, b2 = max(a, c["in"]), min(b, c["out"])
                 x0, x1 = self.x_of(base + a2 - c["in"]), self.x_of(base + b2 - c["in"])
@@ -134,10 +152,37 @@ class _Canvas(QWidget):
         return len(tl.clips)
 
     # ------------------------------------------------------------ painting
-    def paintEvent(self, _e):
+    # Everything but the playhead is kept as a picture: while the video plays only the playhead moves (many times
+    # a second), and drawing the whole timeline each time took the time the video needed (it stuttered).
+    def update(self, *args):
+        self._static = None                          # something changed: drawn again
+        super().update(*args)
+
+    def move_playhead(self, old_x, new_x):
+        """Only the strip around the old and the new playhead is painted again."""
+        lo, hi = min(old_x, new_x), max(old_x, new_x)
+        super().update(int(lo) - 8, 0, int(hi - lo) + 17, self.height())
+
+    def paintEvent(self, e):
         c = theme.colors()
+        ratio = self.devicePixelRatioF()
+        st = getattr(self, "_static", None)
+        if st is None or st.size() != self.size() * ratio:
+            st = QPixmap(self.size() * ratio)
+            st.setDevicePixelRatio(ratio)
+            q = QPainter(st)
+            q.setRenderHint(QPainter.Antialiasing)
+            self._paint_static(q, c)
+            q.end()
+            self._static = st
         p = QPainter(self)
+        p.drawPixmap(e.rect(), st, QRectF(e.rect().x() * ratio, e.rect().y() * ratio,
+                                          e.rect().width() * ratio, e.rect().height() * ratio).toRect())
         p.setRenderHint(QPainter.Antialiasing)
+        self._paint_playhead(p, c)
+        p.end()
+
+    def _paint_static(self, p, c):
         p.fillRect(self.rect(), QColor(c["panel"] if "panel" in c else c["bg"]))
         self._ruler(p, c)
         for y, h in ((SUB_Y, SUB_H), (VID_Y, VID_H), (NAR_Y, NAR_H)):          # track lanes
@@ -155,6 +200,8 @@ class _Canvas(QWidget):
             p.setPen(QColor(c["muted"]))
             p.drawText(QRectF(0, VID_Y, self.width(), VID_H), Qt.AlignCenter,
                        self.v.empty_text)
+
+    def _paint_playhead(self, p, c):
         x = self.x_of(self.v.playhead)                                       # the playhead
         p.setPen(QPen(QColor(c["accent"]), 1.5))
         p.drawLine(QPointF(x, 4), QPointF(x, self.height()))
@@ -164,7 +211,6 @@ class _Canvas(QWidget):
         tri.lineTo(x, 10)
         tri.closeSubpath()
         p.fillPath(tri, QColor(c["accent"]))
-        p.end()
 
     def _ruler(self, p, c):
         step = next((s for s in STEPS if s * self.v.px >= 70), STEPS[-1])
@@ -255,7 +301,7 @@ class _Canvas(QWidget):
                 p.setPen(Qt.NoPen)
                 p.drawEllipse(QPointF(r.right() - 6, r.top() + 7), 2.5, 2.5)
             if r.width() > 18:
-                text = next((t for (a, b, t, kk) in self.v.video(video).cues if kk == k), "")
+                text = self.v.video(video).text_of.get(k, "")
                 p.setPen(QColor(c["accent_fg"] if sel else c["fg"]))
                 p.drawText(r.adjusted(5, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft,
                            fm.elidedText(text, Qt.ElideRight, r.width() - 12))
@@ -551,7 +597,10 @@ class TimelineView(QWidget):
         self.canvas = _Canvas(self)
         self.heads = _Heads(self)
         self.scroll = QScrollBar(Qt.Horizontal)
-        self.scroll.valueChanged.connect(self.canvas.update)
+        self.scroll.valueChanged.connect(self._scrolled)
+        self._auto = False                  # the scroll is being moved by the playhead (not by the user)
+        self._user_until = 0.0              # the user scrolled: the playhead does not pull the view back until
+        self.scroll.sliderReleased.connect(self._released)
         mid = QHBoxLayout()
         mid.setContentsMargins(0, 0, 0, 0)
         mid.setSpacing(0)
@@ -736,14 +785,33 @@ class TimelineView(QWidget):
         self.seek.emit(t)
         self.canvas.update()
 
+    HOLD = 3.0          # seconds after the user scrolled before the view follows the playhead again
+
+    def _released(self):
+        import time
+        self._user_until = time.monotonic() + self.HOLD     # let go: a moment more to look before it follows
+
+    def _scrolled(self, _v):
+        if not self._auto:                             # the user moved it (bar, wheel, zoom): leave it there
+            import time
+            self._user_until = time.monotonic() + self.HOLD
+        self.canvas.update()
+
     def set_playhead(self, t, follow=True):
+        import time
+        old_x = self.canvas.x_of(self.playhead)
         self.playhead = t
-        if follow:                                     # keep the line in sight while playing
+        user = self.scroll.isSliderDown() or time.monotonic() < self._user_until
+        if follow and not user:                        # keep the line in sight while playing
             x = self.canvas.x_of(t)
             w = self.canvas.width()
             if x > w - 40 or x < 0:
+                self._auto = True
                 self.scroll.setValue(int(max(0.0, t * self.px - w * 0.2)))
-        self.canvas.update()
+                self._auto = False
+                self.canvas.update()                   # scrolled: everything moves
+                return
+        self.canvas.move_playhead(old_x, self.canvas.x_of(t))
 
     def zoom(self, factor, at_x=None):
         at_x = self.canvas.width() / 2 if at_x is None else at_x

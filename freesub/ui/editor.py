@@ -6,6 +6,8 @@ import os
 import threading
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
+
+from ..i18n import tr
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem, QVBoxLayout,
                                QWidget)
@@ -134,6 +136,7 @@ class Editor(QWidget):
             times = None
         changed = times != self.voice_times
         self.voice_times = times
+        self._hl = None
         self._voice_tip()
         if changed and on:
             self._refill_later()
@@ -151,6 +154,7 @@ class Editor(QWidget):
                                     "line (the video and Export follow it)")
 
     def _voice_toggled(self, on):
+        self._hl = None
         from ..config import settings
         settings().update(dub_sync_subs=on)
         self._voice_tip()
@@ -178,6 +182,8 @@ class Editor(QWidget):
 
     # ------------------------------------------------------------ load / show
     def load(self, video: str):
+        if getattr(self, "_fit_job", None):              # lines being fitted: keep what is done so far
+            self._save()
         self._flush()
         self.project = Project(video) if video else None
         self.src = load_srt(self.project.src_srt) if self.project and self.project.has(SRC_SRT) else []
@@ -201,6 +207,8 @@ class Editor(QWidget):
         self.table.verticalScrollBar().setValue(bar)
 
     def _fill(self):
+        self._hl = None                                   # the times the row highlight follows: again
+        self.table.setUpdatesEnabled(False)               # thousands of rows: drawn once, at the end
         self.table.blockSignals(True)
         self.table.setRowCount(len(self.src))
         voice = self.voice_mode()
@@ -227,6 +235,7 @@ class Editor(QWidget):
                         it.setForeground(self.palette().placeholderText())
                 self.table.setItem(i, col, it)
         self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
         n = len(self.src)
         self.count.setText(f"{n} line{'s' if n != 1 else ''}" + (" · translated" if any(c.text for c in self.tr) else ""))
         self.table.setVisible(n > 0)
@@ -258,7 +267,9 @@ class Editor(QWidget):
     def highlight(self, t: float):
         if not self.src or not self.isVisible() or self.table.state() == QAbstractItemView.EditingState:
             return
-        i = cue_at(self.shown_cues("original") if self.voice_mode() else self.src, t)
+        if getattr(self, "_hl", None) is None:            # made once (not 30 times a second while playing)
+            self._hl = self.shown_cues("original") if self.voice_mode() else self.src
+        i = cue_at(self._hl, t)
         if i >= 0 and i != self.table.currentRow():
             self.table.blockSignals(True)
             self.table.selectRow(i)
@@ -359,6 +370,7 @@ class Editor(QWidget):
             self._learn()
 
     def _edited(self, item):
+        self._hl = None
         r, c = item.row(), item.column()
         text = item.text().replace(" / ", "\n").strip()
         try:
@@ -419,11 +431,12 @@ class Editor(QWidget):
             log.warning("Could not save the subtitles: %s", e)
         self._dirty.clear()
 
-    @wait_cursor()
     def fit_lines(self):
-        """Break every line (original and translation) again so it fits the box / the video width."""
+        """Break every line (original and translation) again so it fits the box / the video width. Done a few
+        lines at a time (the window keeps working, the table changes as it goes): thousands of lines take a
+        while."""
         p = self.project
-        if not p or not self.src:
+        if not p or not self.src or getattr(self, "_fit_job", None):
             return
         from PySide6.QtGui import QFontMetricsF
         from ..core import ffmpeg
@@ -452,23 +465,62 @@ class Editor(QWidget):
                 f = qt_font(st["font"], st["bold"])
                 f.setPixelSize(px)
                 fm = QFontMetricsF(f)
-                fonts[px] = lambda s, fm=fm: fm.horizontalAdvance(s)
+                cache = {}
+
+                def measure(s, fm=fm, cache=cache):
+                    w = cache.get(s)
+                    if w is None:
+                        w = cache[s] = fm.horizontalAdvance(s)
+                    return w
+                fonts[px] = measure
             return fonts[px]
-        changed = 0
         n_lines, n_words = limits_text()
-        for cues, key in ((self.src, "src"), (self.tr, "tr")):
-            for c in cues:
+        where = "the box" if region else "the video width"
+        work = [(c, "src", i, C_SRC) for i, c in enumerate(self.src)] + \
+               [(c, "tr", i, C_TR) for i, c in enumerate(self.tr)]
+        job = {"i": 0, "changed": 0, "project": p, "base": self.count.text()}
+        self._fit_job = job
+        self.b_fit.setEnabled(False)
+        timer = QTimer(self)
+        timer.setInterval(15)
+        BATCH = 40                                        # lines per step: the window stays responsive
+
+        def stop(done):
+            timer.stop()
+            timer.deleteLater()
+            self._fit_job = None
+            self.b_fit.setEnabled(bool(self.src))
+            if not done:
+                return
+            self._save()
+            self.cues_changed.emit()
+            n = job["changed"]
+            self.count.setText(job["base"] + tr(f" · {n} line{'s' if n != 1 else ''} fitted to {where}"))
+            log.info("Lines fitted to %s (%d px wide): %d changed", where, max_w, n)
+
+        def step():
+            if self.project is not job["project"]:        # another video was opened meanwhile: stop
+                stop(False)
+                return
+            end = min(len(work), job["i"] + BATCH)
+            self.table.blockSignals(True)
+            for c, key, r_, col in work[job["i"]:end]:
                 new = fit(c.text, measure_for, max_w, st["size"], box_h, n_lines, n_words)
                 if new != c.text:
                     c.text = new
-                    changed += 1
+                    job["changed"] += 1
                     self._dirty.add(key)
-        self._fill()
-        self._save()
-        self.cues_changed.emit()
-        where = "the box" if region else "the video width"
-        self.count.setText(self.count.text() + f" · {changed} line{'s' if changed != 1 else ''} fitted to {where}")
-        log.info("Lines fitted to %s (%d px wide): %d changed", where, max_w, changed)
+                    it = self.table.item(r_, col)
+                    if it is not None:
+                        it.setText(new.replace("\n", " / "))
+            self.table.blockSignals(False)
+            job["i"] = end
+            self.count.setText(tr("Fitting the lines… {a}/{b}").replace("{a}", str(end))
+                               .replace("{b}", str(len(work))))
+            if end >= len(work):
+                stop(True)
+        timer.timeout.connect(step)
+        timer.start()
 
     def open_output(self):
         if not self.project:
