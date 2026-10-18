@@ -3,14 +3,6 @@
 Tạo phụ đề, dịch và thuyết minh cho video. Miễn phí, mã nguồn mở (MIT), chạy trên Windows 10/11 64-bit.
 
 ---
-<img width="1920" height="1079" alt="image" src="https://github.com/user-attachments/assets/e9c9a663-d483-4b50-a37c-d5aa9831f0ac" />
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/87b37b64-6a60-4fde-a4a9-db641b162599" />
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/5b8617d6-8842-4580-b19c-3f9e0aeaac18" />
-
-
-
-
-
 
 ---
 ## Tính năng
