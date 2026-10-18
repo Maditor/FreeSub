@@ -100,6 +100,11 @@ def tr(s, _depth=0):
     return out
 
 
+def _fill(m, names, value, depth):
+    parts = {n: (tr(g, depth + 1) if depth < 4 else g) for n, g in zip(names, m.groups())}
+    return _FIELD.sub(lambda f: parts.get(f.group(1), f.group(0)), value)
+
+
 def _translate(s: str, depth: int):
     core = s.strip()
     if core != s:                                         # keep the spaces around it
@@ -108,11 +113,21 @@ def _translate(s: str, depth: int):
             return None
         i = s.index(core)
         return s[:i] + t + s[i + len(core):]
+    later = None
     for rx, names, value in _patterns:
         m = rx.match(s)
         if m:
-            parts = {n: (tr(g, depth + 1) if depth < 4 else g) for n, g in zip(names, m.groups())}
-            return _FIELD.sub(lambda f: parts.get(f.group(1), f.group(0)), value)
+            if any(" · " in g for g in m.groups()):   # "2 ticked · 1 exported": the pieces first
+                later = later or (m, names, value)
+                continue
+            return _fill(m, names, value, depth)
+    if later is not None and " · " in s and depth < 4:
+        pieces = s.split(" · ")
+        done = [tr(p, depth + 1) for p in pieces]
+        if done != pieces:
+            return " · ".join(done)
+    if later is not None:
+        return _fill(*later, depth)
     m = _CODE.match(s)
     if m and depth < 4:
         t = tr(m.group(1), depth + 1)

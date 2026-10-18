@@ -4,8 +4,9 @@ when Export is pressed (export_dialog.py); the subtitle look is in the left colu
 Every option is saved the moment it changes, so next time a video is added, pressing Export runs the same
 recipe. Only the Export / Subtitles-only buttons start work.
 """
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QLabel, QLineEdit, QMenu, QPlainTextEdit,
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QLabel, QLineEdit, QMenu,
+                               QSizePolicy,
                                QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from ..config import settings
@@ -13,7 +14,8 @@ from ..core import addons, gpu
 from ..langs import LANGS
 from ..tts import voices
 from .panels.voice import DictionaryDialog, Speaker
-from .widgets import Card, Collapsible, Segmented, button, form_row, label, row
+from ..i18n import Keep, tr
+from .widgets import Card, IconButton, MenuPicker, Segmented, button, form_row, label, row, wait_cursor
 
 TARGETS = ["vi", "en", "ja", "ko", "zh", "th", "id", "fr", "es", "de", "ru", "pt"]
 SERVICE_TEXT = {"google": "Google Translate (free, no key)", "gemini": "Gemini (AI, API key)",
@@ -95,7 +97,7 @@ class Recipe(QWidget):
         from PySide6.QtWidgets import QSizePolicy
         self.plan.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.buttons_row = row(self.b_subs, self.b_export)
-        lay.addWidget(self.plan)
+        self.plan.setVisible(False)                 # (what will run: shown by the steps themselves)
         lay.addWidget(self.buttons_row)
         self.refresh()
 
@@ -119,11 +121,8 @@ class Recipe(QWidget):
                            s["whisper_language"])
         self.quality = QComboBox()
         self.gpu_text = ""
-        self.hint = QLineEdit(s["whisper_prompt"])
-        self.hint.setPlaceholderText("Names to spell right, e.g. Tanjiro, Nezuko")
         sl.addWidget(form_row("Language", self.lang, "Language spoken in the video"))
         sl.addWidget(form_row("Quality", self.quality))
-        sl.addWidget(form_row("Names", self.hint, "Optional: names and words Whisper should spell right"))
         self.speakers = QCheckBox("New line when the speaker changes")
         self.speakers.setToolTip("Tells the voices apart: two people in one line become two lines, and each "
                                  "person keeps one narration voice. Downloads a 28 MB model on first use.")
@@ -139,8 +138,23 @@ class Recipe(QWidget):
         self.b_area = button("Select the subtitle area on the video", self.area_requested.emit)
         self.area_state = label("", muted=True, wrap=True)
         ol.addWidget(self.b_area)
-        ol.addWidget(self.area_state)
+        self.area_state.setVisible(False)
         lay.addWidget(self.ocr_box)
+
+        # the name list: under Quality (speech) or under the area button (OCR): Whisper spells them right, the
+        # translation keeps them
+        self.b_names = MenuPicker()
+        self.b_names.setToolTip("Names and words of this series: Whisper spells them right, and the translation "
+                                "uses yours (original = translation)")
+        self.names_menu = QMenu(self.b_names)
+        self.names_menu.aboutToShow.connect(self._fill_names_menu)
+        self.b_names.setMenu(self.names_menu)
+        self.b_names.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.b_names_edit = IconButton("edit", "Edit the name lists", size=18)
+        self.b_names_edit.clicked.connect(self._edit_names)
+        self.names_row = form_row("Names", row(self.b_names, self.b_names_edit, spacing=4))
+        self._speech_lay, self._ocr_lay = sl, ol
+        self._show_names()
 
         self.separate = QCheckBox("Separate the voice from music first")
         self.separate.setToolTip("Clearer recognition in films and anime with music")
@@ -150,7 +164,6 @@ class Recipe(QWidget):
         self.sync_quality()
         self.lang.currentIndexChanged.connect(self._lang)
         self.quality.currentIndexChanged.connect(self._quality)
-        self.hint.editingFinished.connect(lambda: settings().update(whisper_prompt=self.hint.text().strip()))
         self.speakers.toggled.connect(_save("whisper_speakers"))
         self.separate.toggled.connect(lambda v: (settings().update(whisper_separate=v), self.refresh()))
         self._source(s["subs_source"], save=False)
@@ -161,6 +174,10 @@ class Recipe(QWidget):
             settings().update(subs_source=v)
         self.speech_box.setVisible(v == "speech")
         self.ocr_box.setVisible(v == "ocr")
+        if v == "speech":                               # Names: right under Quality
+            self._speech_lay.insertWidget(2, self.names_row)
+        else:
+            self._ocr_lay.addWidget(self.names_row)
         self.changed.emit()
         self.refresh()
 
@@ -233,36 +250,112 @@ class Recipe(QWidget):
         self.target = _combo([(k, LANGS.get(k, k)) for k in TARGETS], s["target_lang"])
         self.key_state = label("", muted=True, wrap=True)
         self.b_keys = button("API keys", self.keys_requested.emit)
-        self.context = QPlainTextEdit(s["translate_context"])
-        self.context.setPlaceholderText("About the video (AI only): names, who is who, tone…")
-        self.context.setFixedHeight(64)
-        self.glossary = QPlainTextEdit(s["translate_glossary"])
-        self.glossary.setPlaceholderText("One per line:  original = translation\ne.g.  炭治郎 = Tanjiro")
-        self.glossary.setFixedHeight(64)
+        self._move_old_context()
+        self.b_style = MenuPicker()
+        self.b_style.setToolTip("How the AI translates: setting, how people address each other, fixed terms "
+                                "(Gemini / Cloudflare follow all of it; Google uses only the fixed terms)")
+        self.style_menu = QMenu(self.b_style)
+        self.style_menu.aboutToShow.connect(self._fill_style_menu)
+        self.b_style.setMenu(self.style_menu)
+        self.b_style_edit = IconButton("edit", "Edit the translation styles", size=18)
+        self.b_style_edit.clicked.connect(self._edit_styles)
+        self._show_style()
         lay.addWidget(form_row("Service", self.service))
         lay.addWidget(form_row("Into", self.target))
-        # keys live in Settings → Translation (no key line / button here)
-        more = QWidget()
-        ml = QVBoxLayout(more)
-        ml.setContentsMargins(0, 0, 0, 0)
-        ml.setSpacing(6)
-        ml.addWidget(label("Film context", muted=True))
-        ml.addWidget(self.context)
-        ml.addWidget(label("Names and terms", muted=True))
-        ml.addWidget(self.glossary)
-        lay.addWidget(Collapsible("Context and names", more))
+        # keys live in Settings → Translation (no key line / button here); names: Steps → Subtitles
+        self.b_style.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        lay.addWidget(form_row("Translation style", row(self.b_style, self.b_style_edit, spacing=4)))
         self.service.currentIndexChanged.connect(lambda: (settings().update(translator=self.service.currentData()),
                                                           self.refresh()))
         self.target.currentIndexChanged.connect(lambda: (settings().update(target_lang=self.target.currentData()),
                                                          self.refresh()))
-        self._ctx_timer = QTimer(self)
-        self._ctx_timer.setSingleShot(True)
-        self._ctx_timer.setInterval(600)
-        self._ctx_timer.timeout.connect(lambda: settings().update(
-            translate_context=self.context.toPlainText(), translate_glossary=self.glossary.toPlainText()))
-        self.context.textChanged.connect(self._ctx_timer.start)
-        self.glossary.textChanged.connect(self._ctx_timer.start)
         return w
+
+    # ---------------------------------------------------------------- name lists
+    def _show_names(self):
+        from ..translate import names
+        lst = names.get(settings()["names_list"])
+        if lst is None and settings()["names_list"]:
+            settings().update(names_list="")             # the list was deleted
+        self.b_names.setText(Keep(lst["name"]) if lst else tr("No list"))
+
+    def _fill_names_menu(self):
+        from ..translate import names
+        m = self.names_menu
+        m.clear()
+        cur = settings()["names_list"]
+        a = m.addAction("No list")
+        a.setCheckable(True)
+        a.setChecked(not cur)
+        a.triggered.connect(lambda: self._pick_names(""))
+        lists = names.all_lists()
+        if lists:
+            m.addSeparator()
+        for x in lists:
+            a = m.addAction(Keep(f"{x['name']}  ({len(x['pairs'])})"))
+            a.setCheckable(True)
+            a.setChecked(x["id"] == cur)
+            a.triggered.connect(lambda _c=False, lid=x["id"]: self._pick_names(lid))
+        m.addSeparator()
+        m.addAction("New list…", self._edit_names)
+
+    def _pick_names(self, lid):
+        settings().update(names_list=lid)
+        self._show_names()
+        self.changed.emit()
+
+    def _edit_names(self):
+        from .names_dialog import NamesDialog
+        with wait_cursor():
+            dlg = NamesDialog(self, settings()["names_list"])
+            if not dlg.work:
+                dlg._new()                                  # no list yet: start one
+        if dlg.exec():
+            settings().update(names_list=dlg.picked)
+        self._show_names()
+        self.changed.emit()
+
+    # ---------------------------------------------------------------- translation styles
+    def _move_old_context(self):
+        """Older FreeSub had a free 'film context' box: its text becomes a style of the user's own."""
+        old = settings()["translate_context"].strip()
+        if old:
+            from ..translate import styles
+            sid = styles.add(tr("My notes"), old)
+            settings().update(translate_context="", translate_style=sid)
+
+    def _show_style(self):
+        from ..translate import styles
+        st = styles.get(settings()["translate_style"])
+        if st["id"] != settings()["translate_style"]:
+            settings().update(translate_style=st["id"])
+        name = st["name"] if st["renamed"] else tr(st["name"])
+        self.b_style.setText(Keep(name))
+
+    def _fill_style_menu(self):
+        from ..translate import styles
+        m = self.style_menu
+        m.clear()
+        cur = settings()["translate_style"]
+        for st in styles.all_styles():
+            name = st["name"] if st["renamed"] else tr(st["name"])
+            a = m.addAction(Keep(name))
+            a.setCheckable(True)
+            a.setChecked(st["id"] == cur)
+            a.triggered.connect(lambda _c=False, sid=st["id"]: self._pick_style(sid))
+
+    def _pick_style(self, sid):
+        settings().update(translate_style=sid)
+        self._show_style()
+        self.changed.emit()
+
+    def _edit_styles(self):
+        from .styles_dialog import StylesDialog
+        with wait_cursor():
+            dlg = StylesDialog(self, settings()["translate_style"])
+        dlg.exec()
+        self._show_style()
+        self.changed.emit()
 
     def refresh_keys(self):
         from ..translate import ai
@@ -325,7 +418,7 @@ class Recipe(QWidget):
         self.male_row = form_row("Men", self.male)
         lay.addWidget(self.female_row)
         lay.addWidget(self.male_row)
-        lay.addWidget(self.split_note)
+        self.split_note.setVisible(False)
         lay.addWidget(self.b_piper)
         from PySide6.QtWidgets import QSizePolicy
         self.speed.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -398,7 +491,7 @@ class Recipe(QWidget):
         one = settings()["voice_mode"] != "split"
         self.female_row.setVisible(named)
         self.male_row.setVisible(named and not one)
-        self.split_note.setVisible(named and not one)
+
         lab = self.female_row.findChild(QLabel)
         if lab is not None:                        # one voice: the women's row holds the voice for every line
             lab.setText("All lines" if one else "Women")

@@ -215,8 +215,7 @@ class BatchPage(QWidget):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setWidget(self.grid_box)
         self.scroll.viewport().installEventFilter(self)     # re-flow the cards whenever the room changes
-        self.empty = label("Add videos or a whole folder: they are made one after another, each with the "
-                           "settings on the right (or its own: the gear on a video).", muted=True, wrap=True)
+        self.empty = label("No videos yet.", muted=True, wrap=True)
         self.empty.setAlignment(Qt.AlignCenter)
         self.b_add = button("Add videos", self.add_files.emit, primary=True)
         self.b_folder = button("Add a folder", self.add_folder.emit)
@@ -231,9 +230,10 @@ class BatchPage(QWidget):
         lay.setContentsMargins(16, 12, 16, 12)
         lay.setSpacing(10)
         lay.addWidget(row(title, self.count, None, self.all))
+        lay.addWidget(row(self.b_add, self.b_folder, None))
         lay.addWidget(self.scroll, 1)
         lay.addWidget(self.empty, 1)
-        lay.addWidget(row(self.b_add, self.b_folder, None, self.summary, self.b_subs, self.b_stop, self.b_run))
+        lay.addWidget(row(self.summary, None, self.b_subs, self.b_stop, self.b_run))
         self._cols = 0
 
     # ---- videos

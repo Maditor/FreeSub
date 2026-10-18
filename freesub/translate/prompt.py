@@ -4,12 +4,15 @@ import re
 from ..langs import name as lang_name
 
 
-def build(lines, src, target, before=(), after=(), context="", glossary="", genders=None):
+def build(lines, src, target, before=(), after=(), context="", glossary="", genders=None, style=""):
     """lines: texts to translate; before: [(source, translation)] already done; after: next source lines."""
     S = lang_name(src) if src and src != "auto" else "the original language"
     T = lang_name(target)
     parts = [f"You are a professional film subtitle translator. Translate {S} subtitles into natural, "
              f"spoken {T}."]
+    if style.strip():
+        parts.append("Translation style guide for this video (follow it; lines written \"original = "
+                     "translation\" are fixed terms):\n" + style.strip()[:6000])
     if context.strip():
         parts.append("About this video (from the viewer: names, relationships, tone):\n" + context.strip()[:2000])
     if glossary.strip():

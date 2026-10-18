@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QTableWidget, QTa
 from ..core.project import SRC_SRT, TR_SRT, Project
 from ..core.subtitle import Cue, cue_at, fmt_clock, load_srt, parse_time, save_srt
 from .queue import open_folder
-from .widgets import IconButton, label, row, section
+from .widgets import IconButton, label, row, section, wait_cursor
 
 log = logging.getLogger(__name__)
 COLS = ["Start", "End", "Voice", "Original", "Translation"]
@@ -94,7 +94,7 @@ class Editor(QWidget):
         self.b_redo.clicked.connect(self.redo_requested.emit)
         self.b_import.clicked.connect(self._import_menu)
         lay.addWidget(self.table, 1)
-        self.hint = label("No subtitles yet. Press Export (the video, or only the subtitles), or use your own .srt.", muted=True, wrap=True)
+        self.hint = label("No subtitles yet.", muted=True, wrap=True)
         lay.addWidget(self.hint)
         self.filler = QWidget()          # takes the room of the table while there is none: the header stays on top
         lay.addWidget(self.filler, 1)
@@ -245,15 +245,15 @@ class Editor(QWidget):
         times when those are shown."""
         if prefer == "translation" and self.tr:
             cues = [Cue(s.start, s.end, (t.text or s.text)) for s, t in zip(self.src, self.tr)]
-        elif not self.voice_mode():
-            return self.src
         else:
             cues = [Cue(s.start, s.end, s.text) for s in self.src]
         if self.voice_mode():
             for i, c in enumerate(cues):
                 if i in self.voice_times:
                     c.start, c.end = self.voice_times[i]
-        return cues
+        from ..core.style import attach_looks
+        fresh = Project(self.project.video) if self.project else None     # read now: looks change meanwhile
+        return attach_looks(cues, fresh)                 # lines with a look of their own (the timeline)
 
     def highlight(self, t: float):
         if not self.src or not self.isVisible() or self.table.state() == QAbstractItemView.EditingState:
@@ -389,6 +389,13 @@ class Editor(QWidget):
         self._save_timer.start()
         self.cues_changed.emit()
 
+    def forget(self, video: str):
+        """This video's project is being deleted: drop unsaved edits (they must not write it back) and let go."""
+        if self.project is not None and self.project.video == os.path.abspath(video):
+            self._save_timer.stop()
+            self._dirty.clear()
+            self.load("")
+
     def _flush(self):
         if self._save_timer.isActive():
             self._save_timer.stop()
@@ -412,6 +419,7 @@ class Editor(QWidget):
             log.warning("Could not save the subtitles: %s", e)
         self._dirty.clear()
 
+    @wait_cursor()
     def fit_lines(self):
         """Break every line (original and translation) again so it fits the box / the video width."""
         p = self.project
@@ -419,7 +427,7 @@ class Editor(QWidget):
             return
         from PySide6.QtGui import QFontMetricsF
         from ..core import ffmpeg
-        from ..core.fit import fit
+        from ..core.fit import fit, limits_text
         from ..core.style import box_region, sub_style
         from ..steps.ocr import region_px
         info = p.meta.get("info") or {}
@@ -447,9 +455,10 @@ class Editor(QWidget):
                 fonts[px] = lambda s, fm=fm: fm.horizontalAdvance(s)
             return fonts[px]
         changed = 0
+        n_lines, n_words = limits_text()
         for cues, key in ((self.src, "src"), (self.tr, "tr")):
             for c in cues:
-                new = fit(c.text, measure_for, max_w, st["size"], box_h)
+                new = fit(c.text, measure_for, max_w, st["size"], box_h, n_lines, n_words)
                 if new != c.text:
                     c.text = new
                     changed += 1

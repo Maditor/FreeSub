@@ -38,6 +38,9 @@ class Watchdog(QObject):
             from ..config import logs_dir
             folder = logs_dir()
             self._fh = open(os.path.join(folder, "freeze.log"), "a", encoding="utf-8")   # noqa: SIM115
+            from ..config import APP_VERSION
+            self._fh.write(f"\n===== FreeSub {APP_VERSION} started {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            self._fh.flush()
             self._faulthandler = faulthandler
             self._arm()
         except Exception as e:  # noqa: BLE001

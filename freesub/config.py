@@ -95,6 +95,7 @@ DEFAULTS = {
     "ffmpeg_path": "",              # empty = ffmpeg\bin next to the app, then PATH
     "window_geometry": "",
     "native_titlebar": False,
+    "confirm_skip": [],             # actions whose question was answered "Don't ask again" ("*" = all)
     "confirm_close": True,          # ask before the window closes (a click on X by mistake)       # True = the usual Windows title bar instead of FreeSub's own
     "window_state": "",
     "last_open_dir": "",
@@ -112,8 +113,10 @@ DEFAULTS = {
     "whisper_min_silence_ms": 500,
     "whisper_filter": True,         # drop hallucinated lines (credits, "thanks for watching"...)
     "whisper_speakers": True,       # cut a line where the speaker changes (speaker voice prints)
-    "whisper_prompt": "",           # optional hint: names, terms
-    "sub_max_chars": 42,            # split cues longer than this (per line)
+    "whisper_prompt": "",           # (older FreeSub: moved into a name list)
+    "names_list": "",               # the chosen name list (translate/names.py), "" = none
+    "sub_max_chars": 42,            # (old) characters per line: now sub_max_words
+    "sub_max_words": 8,             # words per line (Chinese / Japanese: twice as many characters)
     "sub_max_lines": 2,
     "sub_max_duration": 6.0,        # seconds
     "sub_min_duration": 0.7,
@@ -130,13 +133,17 @@ DEFAULTS = {
     "ocr_min_score": 0.6,
     "sub_box": True,                # show the subtitles inside the drawn box (blurred, darker picture under it)
     "sub_box_always": False,        # keep the box on screen the whole video (not only while a line shows)
-    "ocr_box_opacity": 20,          # % how dark the box is
+    "video_speed": 1.0,             # playback speed 0.25 - 2: the preview plays at it and the export is made at it
+    "ocr_box_opacity": 20,          # % how strongly the box colour covers the picture
+    "sub_box_color": "#000000",
+    "box_region": None,             # the box moved away from the OCR area (dragged on the video); None = same
     "ocr_box_blur": 10,             # px blur of the picture under the box
     # translation
     "translator": "google",         # google | gemini | cloudflare
     "translate_fallback": True,     # try the other services when one fails
     "target_lang": "vi",
-    "translate_context": "",        # about the film: names, relationships, tone
+    "translate_style": "general",   # translate/styles.py: the guide the AI follows (setting, address, terms)
+    "translate_context": "",        # (old) about the film: moved into a translation style on first start
     "translate_glossary": "",       # "source = target" lines
     "translate_batch": 30,          # lines per AI request
     "gemini_key": "",
@@ -166,6 +173,7 @@ DEFAULTS = {
     "dub_separate": True,           # split voice / music so the three volumes can be set apart
     # export
     "export_subs": "hard",          # always burned in (an own track / no subtitles were dropped)
+    "export_scope": "each",         # each video on its own | the timeline as one video
     "export_target": "video",
     "queue_view": "list",           # list | grid (the video list on the left)       # video | srt (Export → Subtitles only: the .srt files, no video)
     "export_which": "translation",  # translation | original | both
@@ -181,6 +189,7 @@ DEFAULTS = {
     "sub_outline_size": "normal",   # none | thin | normal | thick
     "sub_outline": "#000000",
     "sub_margin": 6.0,              # % from the bottom (when there is no box)
+    "sub_pos_x": 0.5,               # centre of the lines, fraction of the width (dragged on the video)
     "open_folder_after": True,
     # preview
     "preview_volume": 80,
@@ -203,6 +212,8 @@ class Settings:
         self.data = dict(DEFAULTS)
         self._lock = threading.Lock()
         self._tl = threading.local()          # per-thread overlay: one video's own settings while it runs
+        self.ui_style = {}                    # the window's video's own style (read on the window's thread)
+        self.style_sink = None                # the window: where a style change of that video goes
         self.load()
 
     def load(self):
@@ -224,17 +235,21 @@ class Settings:
             except OSError:
                 pass
 
-    def __getitem__(self, key):
+    def _over(self, key):
         over = getattr(self._tl, "over", None)
         if over and key in over:
-            return over[key]
-        return self.data.get(key, DEFAULTS.get(key))
+            return True, over[key]
+        if self.ui_style and key in self.ui_style and threading.current_thread() is threading.main_thread():
+            return True, self.ui_style[key]
+        return False, None
+
+    def __getitem__(self, key):
+        hit, v = self._over(key)
+        return v if hit else self.data.get(key, DEFAULTS.get(key))
 
     def get(self, key, default=None):
-        over = getattr(self._tl, "over", None)
-        if over and key in over:
-            return over[key]
-        return self.data.get(key, DEFAULTS.get(key, default))
+        hit, v = self._over(key)
+        return v if hit else self.data.get(key, DEFAULTS.get(key, default))
 
     @contextlib.contextmanager
     def overlay(self, values: dict | None):
@@ -247,9 +262,20 @@ class Settings:
             self._tl.over = prev
 
     def update(self, **kw):
-        self.data.update(kw)
-        self.save()
+        style = {k: v for k, v in kw.items() if k in STYLE_KEYS}
+        if style and self.style_sink is not None and threading.current_thread() is threading.main_thread():
+            if self.style_sink(style):            # kept by the video (not the shared settings)
+                kw = {k: v for k, v in kw.items() if k not in STYLE_KEYS}
+        if kw:
+            self.data.update(kw)
+            self.save()
 
+
+# How the subtitles look: each video keeps its own (project.json "style"); the shared values are what a video
+# that was never styled shows (and what Sync writes to every open video).
+STYLE_KEYS = ("sub_font", "sub_size", "sub_bold", "sub_color", "sub_outline_size", "sub_outline", "sub_margin",
+              "sub_pos_x", "sub_max_words", "sub_max_lines", "sub_max_duration", "sub_box", "sub_box_always",
+              "sub_box_color", "ocr_box_opacity", "ocr_box_blur", "video_speed")
 
 SETTINGS = None
 

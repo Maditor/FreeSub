@@ -38,9 +38,15 @@ def speech_steps():
     return subtitle_steps()
 
 
+# Steps that write the sound files the preview may have open (Windows cannot write a file that is mapped):
+# before them, before_write(video) is called (the window sets it; it returns once the files are let go).
+WRITES_SOUND = ("audio", "separate", "dub")
+before_write = None
+
+
 def recipe(project: Project | None = None, upto: str | None = None) -> list[str]:
     """All steps Export runs. upto='translate' stops after the subtitles (the 'Subtitles only' button),
-    upto='live' is the preview's narration (the mic button)."""
+    upto='live' is the preview's narration (the mic button), upto='run' everything but the export (Run)."""
     s = settings()
     if upto == "live":
         return _live_recipe(project, s)
@@ -53,7 +59,7 @@ def recipe(project: Project | None = None, upto: str | None = None) -> list[str]
         if s["dub_separate"] and "separate" not in steps and not (project and project.is_done("separate")):
             steps.append("separate")               # voice / music apart: three volumes in the mix
         steps.append("dub")                        # the exported video then has the narration
-    if upto == "dub":
+    if upto in ("dub", "run"):
         return steps
     steps.append("export")
     return steps
@@ -93,7 +99,9 @@ def run_video(video: str, steps, control, on_step=None, force=False, upto=None, 
     """steps: list, or None = the saved recipe. on_step(step_id, state, text): start | done | failed | stopped.
     part: 'front' or 'back' = only that half of the recipe (two videos are worked on at once: see lanes())."""
     project = Project(video)
-    with settings().overlay(project.meta.get("overrides")):    # this video's own settings, if any
+    from ..core.style import video_style
+    own = dict(video_style(project), **(project.meta.get("overrides") or {}))
+    with settings().overlay(own):    # this video's own look and settings, if any
         if part is not None:
             all_steps = steps if steps is not None else recipe(project, upto)
             steps = [s for s in all_steps if (s in BACK) == (part == "back")]
@@ -194,6 +202,8 @@ def _run_steps(project, steps, control, on_step, force, upto):
             else:
                 f = force and sid == steps[-1]
             made = _made_files(project, sid)
+            if sid in WRITES_SOUND and before_write is not None:
+                before_write(project.video)            # the window lets go of this video's sound files first
             fn(project, control, f)
             _fit_new_lines(project, sid, made)
         except Cancelled:

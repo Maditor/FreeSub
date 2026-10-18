@@ -2,9 +2,6 @@
 
 Tạo phụ đề, dịch và thuyết minh cho video. Miễn phí, mã nguồn mở (MIT), chạy trên Windows 10/11 64-bit.
 
----
-
----
 ## Tính năng
 
 - **Phụ đề** từ giọng nói (Whisper) hoặc từ chữ có sẵn trên hình (OCR).
@@ -12,9 +9,12 @@ Tạo phụ đề, dịch và thuyết minh cho video. Miễn phí, mã nguồn 
 - **Thuyết minh** bằng giọng Edge (trực tuyến) hoặc Piper (offline). Có thể nghe thử ngay trên video
   bằng nút micro trước khi xuất.
 - **Xuất** video có phụ đề và thuyết minh, hoặc chỉ file `.srt`.
-- **Hàng loạt**: làm nhiều video một lần, mỗi video có thể có cài đặt riêng.
-- Kiểu chữ, khung phụ đề, cắt đoạn video, xem trước đúng như khi xuất.
-- Giao diện tiếng Việt hoặc tiếng Anh.
+- **Dự án**: mỗi dự án chứa nhiều video (đánh số, kéo để đổi thứ tự) và dùng chung một kiểu chữ, khung phụ đề.
+- **Timeline**: kéo video vào, cắt, đổi thứ tự, dời phụ đề, rồi xuất thành một video (hoặc một file `.srt`).
+- **Hàng loạt** (Batch): làm từng video trong dự án, mỗi video ra một file.
+- **Tốc độ phát** 0.25× – 2×: xem trước và xuất video đúng tốc độ đó.
+- **Danh sách tên riêng** cho từng bộ phim: nghe đúng tên khi làm phụ đề, dịch đúng theo cách của bạn.
+- Kiểu chữ, khung phụ đề, xem trước đúng như khi xuất. Giao diện tiếng Việt hoặc tiếng Anh.
 
 ## Cài đặt
 
@@ -24,18 +24,23 @@ Tạo phụ đề, dịch và thuyết minh cho video. Miễn phí, mã nguồn 
 
 ## Cách dùng
 
-1. Kéo thả video (hoặc cả thư mục) vào cửa sổ.
-2. Ở cột phải, bật các bước cần làm: **Phụ đề**, **Dịch**, **Thuyết minh**.
-3. Bấm **Xuất**. Xong thì thư mục kết quả tự mở.
+1. Bấm **Dự án mới**, kéo thả video (hoặc cả thư mục) vào cột Media.
+2. Kéo video xuống timeline (cắt bỏ đoạn thừa nếu cần).
+3. Ở cột phải, bật các bước cần làm: **Phụ đề**, **Dịch**, **Thuyết minh**.
+4. Bấm **Xuất**. Xong thì thư mục kết quả tự mở. Muốn mỗi video ra một file riêng: dùng **Batch**.
 
 Bị dừng giữa chừng thì lần sau làm tiếp từ chỗ dừng. Sửa phụ đề: bấm đúp vào ô trong bảng phụ đề.
 
 | Phím | Tác dụng |
 |---|---|
 | Space | Phát / dừng |
-| ← / → | Lùi / tới 5 giây |
-| Ctrl + lăn chuột | Phóng to / thu nhỏ video |
-| Ctrl+E | Xuất |
+| ← / → | Lùi / tới 1 khung hình (Shift: 5 giây) |
+| ↑ / ↓ | Điểm cắt (hoặc câu phụ đề) trước / sau |
+| Ctrl+B | Cắt đôi đoạn tại vạch |
+| Q / W | Xoá phần bên trái / phải vạch |
+| Ctrl+Z / Ctrl+Shift+Z | Hoàn tác / làm lại |
+| Ctrl + lăn chuột | Phóng to / thu nhỏ |
+| Ctrl+I / Ctrl+E | Thêm video / Xuất |
 
 Bản exe (trang Releases): giải nén rồi chạy `FreeSub.exe`, không cần cài Python. Lần đầu app hỏi tải ffmpeg.
 Piper và hỗ trợ GPU NVIDIA chỉ tải khi bạn bấm nút tải trong app.

@@ -148,9 +148,6 @@ class DictionaryDialog(QDialog):
         top.addWidget(self.search, 1)
         top.addWidget(self.kind)
         lay = QVBoxLayout(self)
-        lay.addWidget(label("Double-click \"Read as\" to correct a word. Write it as it should sound, in Vietnamese "
-                            "syllables joined by \"-\" (e.g. Mai-cơ, Phây-búc). Your version always wins.",
-                            muted=True, wrap=True))
         lay.addLayout(top)
         lay.addWidget(self.table, 1)
         lay.addWidget(row(self.count, None, b_add, b_del, b_listen, b_close))

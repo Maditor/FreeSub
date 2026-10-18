@@ -123,7 +123,7 @@ def _keep_shift(cues, a, b):
     for c in cues or []:
         if c.end <= a or c.start >= b:
             continue
-        out.append(Cue(max(c.start, a) - a, min(c.end, b) - a, c.text))
+        out.append(Cue(max(c.start, a) - a, min(c.end, b) - a, c.text, dict(c.extra)))
     return out
 
 
@@ -134,20 +134,45 @@ def _remove_map(cues, a, b):
     out = []
     for c in cues or []:
         if c.end <= a:
-            out.append(Cue(c.start, c.end, c.text))
+            out.append(Cue(c.start, c.end, c.text, dict(c.extra)))
         elif c.start >= b:
-            out.append(Cue(c.start - gap, c.end - gap, c.text))
+            out.append(Cue(c.start - gap, c.end - gap, c.text, dict(c.extra)))
         elif c.start < a:
-            out.append(Cue(c.start, a, c.text))
+            out.append(Cue(c.start, a, c.text, dict(c.extra)))
         elif c.end > b:
-            out.append(Cue(a, c.end - gap, c.text))
+            out.append(Cue(a, c.end - gap, c.text, dict(c.extra)))
+    return out
+
+
+def _line_styles(cues, H, W, video_area, base):
+    """Lines with a look of their own (the timeline): {index in cues: style dict for to_ass}. A line in a box
+    (the video's or its own) is centred in it; a line without a box sits where its position says."""
+    from ..core.style import box_look
+    out = {}
+    for i, c in enumerate(cues):
+        look = c.extra.get("look")
+        if not look:
+            continue
+        st = sub_style(H, look)
+        one = {"font": st["font"], "bold": st["bold"], "size": st["size"], "color": st["color"],
+               "outline_color": st["outline_color"], "outline": st["outline"]}
+        b = box_look(look, video_area)
+        if b["on"]:
+            x, y, w, h = region_px(b["area"], W, H)
+            lines = c.text.count("\n") + 1
+            one["size"] = max(10, min(st["size"], int(h / (lines * 1.25))))
+            one["pos"], one["an"] = (x + w / 2, y + h / 2), 5
+        else:
+            one["pos"], one["an"] = (st["pos_x"] * W, H - st["margin_v"]), 2
+        out[i] = one
     return out
 
 
 def _subs_for(project: Project, which: str):
     """(translation cues or None, original cues or None)."""
-    tr = load_srt(project.tr_srt) if project.has(TR_SRT) else None
-    src = load_srt(project.src_srt) if project.has(SRC_SRT) else None
+    from ..core.style import attach_looks
+    tr = attach_looks(load_srt(project.tr_srt), project) if project.has(TR_SRT) else None
+    src = attach_looks(load_srt(project.src_srt), project) if project.has(SRC_SRT) else None
     if which == "original":
         return None, src
     if which == "both":
@@ -156,14 +181,29 @@ def _subs_for(project: Project, which: str):
 
 
 # ------------------------------------------------------------------ the step
-def run(project: Project, control, force=False) -> str:
+def _atempo(speed: float) -> str:
+    """ffmpeg's atempo takes 0.5 - 2 at a time: 0.25 = 0.5 x 0.5."""
+    parts = []
+    while speed < 0.5:
+        parts.append(0.5)
+        speed /= 0.5
+    while speed > 2.0:
+        parts.append(2.0)
+        speed /= 2.0
+    parts.append(speed)
+    return ",".join(f"atempo={p:g}" for p in parts)
+
+
+def run(project: Project, control, force=False, segment=None) -> str:
+    """segment (the timeline): {"start", "end", "out", "width", "height", "fps"}: only that part of the video,
+    made to that size / frame rate with stereo sound, written to "out" (the timeline joins the parts)."""
     s = settings()
     info = ffmpeg.probe(project.video)
     if not info.get("has_video"):
         raise RuntimeError("This file has no picture: there is no video to export")
     W, H, dur = info["width"], info["height"], info["duration"]
     container = s["export_container"]
-    out = project.out_video(container)
+    out = segment["out"] if segment else project.out_video(container)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     tmp = out + ".part." + container
     project.ensure()
@@ -185,6 +225,8 @@ def run(project: Project, control, force=False) -> str:
         raise RuntimeError("There are no subtitles for this video yet, so the video would come out without any. "
                            "Switch on Subtitles (and Translate) in Steps.")
     box_area = box_region(project) if mode == "hard" else None      # subtitles inside the drawn box
+    from ..core.style import box_area as _video_box_area
+    video_area = _video_box_area(project)          # where this video's box is (lines may have their own)
 
     # sound: the narration mix when Narration is on, else the original
     audio_file = project.path("mix.wav") if s["do_voice"] else None
@@ -195,7 +237,8 @@ def run(project: Project, control, force=False) -> str:
         log.warning("No translation for this video: the original subtitles are used")
 
     # cut: keep only [a, b] (fast: the inputs are cut while reading) or remove [a, b] (trim + join)
-    cut = project.cut
+    # cutting is done on the timeline now (the old Cut tab is gone: a cut saved by an older version is not used)
+    cut = {"mode": "keep", "start": float(segment["start"]), "end": float(segment["end"])} if segment else None
     seek, remove = [], None
     if cut:
         a, b = max(0.0, cut["start"]), min(dur or cut["end"], cut["end"])
@@ -213,23 +256,43 @@ def run(project: Project, control, force=False) -> str:
     graph, vlabel = [], "0:v"
     work = project.folder
 
-    # 1) dialogue box over the area the hard subtitles were read from
-    if box_area and main:
-        x, y, w, h = region_px(box_area, W, H)
-        spans = _intervals(main)
-        if spans:
+    # 1) dialogue boxes: the video's, and the boxes some lines have of their own (place, colour...)
+    if main and mode == "hard":
+        from ..core.style import box_look
+        groups = {}                                  # (area, colour, opacity, blur) -> the lines' times
+        for c in main:
+            if not c.text.strip():
+                continue
+            b = box_look(c.extra.get("look"), video_area)
+            if not b["on"]:
+                continue
+            key = (tuple(round(v, 4) for v in b["area"]), b["color"], round(b["opacity"], 3), b["blur"])
+            groups.setdefault(key, []).append(c)
+        default = box_look(None, video_area)
+        always = bool(s["sub_box_always"]) and default["on"]
+        if always:
+            groups.setdefault((tuple(round(v, 4) for v in default["area"]), default["color"],
+                               round(default["opacity"], 3), default["blur"]), [])
+        k = 0
+        for (area, color, alpha, blur), cues in groups.items():
+            is_default = always and list(area) == [round(v, 4) for v in default["area"]] and \
+                color == default["color"] and blur == default["blur"]
+            spans = _intervals(cues)
+            if not spans and not is_default:
+                continue
+            x, y, w, h = region_px(list(area), W, H)
             # boxblur refuses a radius over half the box (a quarter for colour): keep it inside
-            blur = max(0, int(s["ocr_box_blur"]))
             luma = max(1, min(blur, min(w, h) // 2 - 1))
             chroma = max(1, min(blur, min(w, h) // 4 - 1))
-            alpha = max(0.0, min(1.0, float(s["ocr_box_opacity"]) / 100))
-            enable = "" if s["sub_box_always"] else \
+            enable = "" if is_default else \
                 ":enable='" + "+".join(f"between(t,{a:.2f},{b:.2f})" for a, b in spans) + "'"
             blur_f = f"boxblur={luma}:2:{chroma}:2," if blur else ""
-            graph.append(f"[0:v]split[base][cut];[cut]crop={w}:{h}:{x}:{y},{blur_f}"
-                         f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{alpha:.2f}:t=fill[box];"
-                         f"[base][box]overlay={x}:{y}{enable}[boxed]")
-            vlabel = "boxed"
+            src = "[0:v]" if vlabel == "0:v" else f"[{vlabel}]"
+            graph.append(f"{src}split[base{k}][cut{k}];[cut{k}]crop={w}:{h}:{x}:{y},{blur_f}"
+                         f"drawbox=x=0:y=0:w=iw:h=ih:color=0x{color[1:]}@{alpha:.2f}:t=fill[box{k}];"
+                         f"[base{k}][box{k}]overlay={x}:{y}{enable}[boxed{k}]")
+            vlabel = f"boxed{k}"
+            k += 1
 
     # 2) burned-in subtitles (ASS made here: font, size, colours, position)
     soft_files = []
@@ -241,21 +304,30 @@ def run(project: Project, control, force=False) -> str:
             tr = {"name": "Main", "cues": main, "font": st["font"], "bold": st["bold"], "size": size,
                   "color": st["color"], "outline_color": st["outline_color"], "outline": outline,
                   "align": 2, "margin_v": st["margin_v"]}
+            if abs(st["pos_x"] - 0.5) > 0.005:          # moved sideways on the video: an exact place
+                tr["pos"] = (st["pos_x"] * W, H - st["margin_v"])
             if box_area:
                 x, y, w, h = region_px(box_area, W, H)
                 lines = max(1, max(c.text.count("\n") + 1 for c in main))
                 tr.update(align=5, pos=(x + w / 2, y + h / 2), margin_l=x + 8, margin_r=W - x - w + 8,
                           size=max(10, min(size, int(h / (lines * 1.25)))))
+            tr["looks"] = _line_styles(main, H, W, video_area, tr)
             tracks.append(tr)
         if extra:
             tracks.append({"name": "Original", "cues": extra, "font": st["font"], "bold": st["bold"],
                            "size": int(size * 0.75), "color": "#e6e6e6", "outline_color": st["outline_color"],
                            "outline": outline * 0.8, "align": 8 if box_area else 2,
-                           "margin_v": st["margin_v"] + (0 if box_area else int(size * 2.6))})
+                           "margin_v": st["margin_v"] + (0 if box_area else int(size * 2.6)),
+                           "pos": None if box_area or abs(st["pos_x"] - 0.5) <= 0.005 else
+                           (st["pos_x"] * W, H - st["margin_v"] - int(size * 2.6))})
         ass = os.path.join(work, "burn.ass")
-        fonts, ass_font = _fonts_dir(work, st["font"])
+        families = [st["font"]] + sorted({lk["font"] for tr in tracks for lk in (tr.get("looks") or {}).values()}
+                                         - {st["font"]})
+        fonts, names = _fonts_dir(work, families)
         for tr in tracks:
-            tr["font"] = ass_font                 # the name libass finds inside the font file
+            tr["font"] = names.get(st["font"], st["font"])     # the name libass finds inside the font file
+            for lk in (tr.get("looks") or {}).values():
+                lk["font"] = names.get(lk["font"], lk["font"])
         with open(ass, "w", encoding="utf-8") as f:
             f.write(to_ass(W, H, tracks))
         opt = ":fontsdir=fonts" if fonts else ""
@@ -274,7 +346,13 @@ def run(project: Project, control, force=False) -> str:
 
     # 3) size
     res = s["export_resolution"]
-    if res != "source" and int(res) < H:
+    if segment:                                  # the timeline: every part the same size and frame rate
+        src_label = f"[{vlabel}]" if vlabel != "0:v" else "[0:v]"
+        sw, sh, fps = int(segment["width"]), int(segment["height"]), float(segment["fps"])
+        graph.append(f"{src_label}scale={sw}:{sh}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                     f"pad={sw}:{sh}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps:g},format=yuv420p[sized]")
+        vlabel = "sized"
+    elif res != "source" and int(res) < H:
         src_label = f"[{vlabel}]" if vlabel != "0:v" else "[0:v]"
         graph.append(f"{src_label}scale=-2:{int(res)}:flags=lanczos[sized]")
         vlabel = "sized"
@@ -308,6 +386,20 @@ def run(project: Project, control, force=False) -> str:
         vlabel = "vcut"
         alabel = "[acut]" if alabel else None
 
+    # 5) playback speed (Preview → 1×): the picture and the sound (narration too) faster or slower; the sound
+    # keeps its pitch. The burned-in lines follow the picture.
+    speed = min(2.0, max(0.25, float(s["video_speed"] or 1.0)))
+    if abs(speed - 1.0) > 1e-3:
+        v_in = f"[{vlabel}]" if vlabel != "0:v" else "[0:v]"
+        fps_out = float(segment["fps"]) if segment else float(info.get("fps") or 0)
+        graph.append(f"{v_in}setpts=PTS/{speed:g}" + (f",fps={fps_out:g}" if fps_out > 0 else "") + "[vspeed]")
+        vlabel = "vspeed"
+        if alabel:
+            a_in = alabel if alabel.startswith("[") else f"[{alabel}]"
+            graph.append(f"{a_in}{_atempo(speed)}[aspeed]")
+            alabel = "[aspeed]"
+        dur = dur / speed
+
     args = inputs[:]
     for p, _lang in soft_files:
         args += ["-i", p]
@@ -319,8 +411,15 @@ def run(project: Project, control, force=False) -> str:
         args += ["-map", f"[{vlabel}]"]
     else:
         args += ["-map", "0:v:0"]
+    if not alabel and segment:                   # a silent part: silence, so the joined video keeps its sound
+        n_in = 1 + (1 if audio_file else 0) + len(soft_files)
+        at = len(inputs) + 2 * len(soft_files)               # with the other inputs, before the outputs
+        args[at:at] = ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+        alabel = f"{n_in}:a"
     if alabel:
         args += ["-map", alabel, "-c:a", "aac", "-b:a", "192k"]
+        if segment:
+            args += ["-ar", "48000", "-ac", "2"]
     first_sub = 1 + (1 if audio_file else 0)
     for k, (_p, lang) in enumerate(soft_files):
         args += ["-map", f"{first_sub + k}:0", f"-metadata:s:s:{k}", f"language={_iso3(lang)}"]
@@ -333,7 +432,22 @@ def run(project: Project, control, force=False) -> str:
 
     params = {"enc": enc, "q": quality, "res": res, "mode": mode, "which": s["export_which"],
               "dub": bool(audio_file), "box": box_area, "always": bool(s["sub_box_always"]), "cut": cut,
-              "sync": synced}
+              "sync": synced, "speed": speed}
+    if segment:                                  # a part of the timeline: not this video's own export
+        try:
+            _run_in(work, args, dur, control, "Exporting part")
+        except Cancelled:
+            _rm(tmp)
+            raise
+        except Exception as e:
+            _rm(tmp)
+            if enc == "x264" or "ffmpeg failed" not in str(e):
+                raise
+            i, j = args.index("-c:v"), args.index("-pix_fmt")
+            args[i:j] = _video_args("x264", quality)
+            _run_in(work, args, dur, control, "Exporting part (CPU)")
+        os.replace(tmp, out)
+        return out
     with step_timer("export", project.video):
         project.mark("export", "running", params=params)
         try:
@@ -361,24 +475,29 @@ def run(project: Project, control, force=False) -> str:
     return out
 
 
-def _fonts_dir(work, family):
-    """Copy the chosen font's files to <work>/fonts for ffmpeg. Returns (found, name to use in the .ass)."""
+def _fonts_dir(work, families):
+    """Copy the chosen fonts' files to <work>/fonts for ffmpeg. Returns (any found, {family: name in the .ass})."""
     import shutil
     from ..core.fonts import find
     d = os.path.join(work, "fonts")
     shutil.rmtree(d, ignore_errors=True)
-    files, name = find(family)
-    if not files:
-        log.warning("Font %r was not found among the installed fonts: ffmpeg picks a similar one", family)
-        return False, family
-    os.makedirs(d, exist_ok=True)
-    for f in files:
-        try:
-            shutil.copyfile(f, os.path.join(d, os.path.basename(f)))
-        except OSError as e:
-            log.warning("Could not copy font %s: %s", f, e)
-    log.info("Font %s (as %r): %s", family, name, ", ".join(os.path.basename(f) for f in files))
-    return True, name
+    names, found = {}, False
+    for family in families:
+        files, name = find(family)
+        if not files:
+            log.warning("Font %r was not found among the installed fonts: ffmpeg picks a similar one", family)
+            names[family] = family
+            continue
+        found = True
+        names[family] = name
+        os.makedirs(d, exist_ok=True)
+        for f in files:
+            try:
+                shutil.copyfile(f, os.path.join(d, os.path.basename(f)))
+            except OSError as e:
+                log.warning("Could not copy font %s: %s", f, e)
+        log.info("Font %s (as %r): %s", family, name, ", ".join(os.path.basename(f) for f in files))
+    return found, names
 
 
 def _run_in(cwd, args, dur, control, label):

@@ -1,5 +1,6 @@
 """Asked when Export is pressed (saved for next time on OK): the video with the subtitles burned in, or only
-the subtitle files (.srt, original and translation), no video."""
+the subtitle files (.srt, original and translation), no video. On the editing page it is the timeline (one
+video / one .srt); on the Batch page, each ticked video."""
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QVBoxLayout, QWidget
 
 from ..config import settings
@@ -29,10 +30,6 @@ class ExportDialog(QDialog):
         self.q = _combo(list(ex.QUALITY_TEXT.items()), s["export_quality"])
         self.open_after = QCheckBox("Open the folder when done")
         self.open_after.setChecked(bool(s["open_folder_after"]))
-        sound = ("Sound: the video's own sound with the narration (Narration is on)." if s["do_voice"]
-                 else "Sound: the video's own sound (switch Narration on for a voice-over).")
-        self.srt_note = label("Makes the .srt files (the original and, with Translate on, the translation) in the "
-                              "video's output folder. No video is made.", muted=True, wrap=True)
 
         # the video's options, hidden for Subtitles only
         self.video_box = QWidget()
@@ -42,7 +39,6 @@ class ExportDialog(QDialog):
         vl.addWidget(form_row("Show", self.which))
         vl.addWidget(form_row("Size", self.res))
         vl.addWidget(form_row("Quality", self.q))
-        vl.addWidget(label(sound, muted=True, wrap=True))
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self._ok)
@@ -52,16 +48,15 @@ class ExportDialog(QDialog):
         lay.addWidget(label("Export", muted=True))
         lay.addWidget(self.target)
         lay.addWidget(self.video_box)
-        lay.addWidget(self.srt_note)
         lay.addWidget(self.open_after)
         lay.addSpacing(4)
         lay.addWidget(bb)
-        self.target.changed.connect(self._show)
-        self._show(target)
+        self.target.changed.connect(lambda _v: self._show())
+        self._show()
 
-    def _show(self, value):
-        self.video_box.setVisible(value != "srt")
-        self.srt_note.setVisible(value == "srt")
+    def _show(self, *_):
+        srt = self.target.value() == "srt"
+        self.video_box.setVisible(not srt)
         self.adjustSize()
 
     def _ok(self):

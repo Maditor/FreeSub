@@ -18,8 +18,6 @@ class VideoSettingsDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setSpacing(8)
         lay.addWidget(label(os.path.basename(video), name="CardTitle"))
-        lay.addWidget(label("Only this video uses these. \"Shared\" follows the settings of all videos.",
-                            muted=True, wrap=True))
         self.combos = []
         s = settings()
         for title, choices in fields():

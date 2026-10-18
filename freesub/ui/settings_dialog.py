@@ -80,10 +80,11 @@ class SettingsDialog(QDialog):
         self.ask_close = QCheckBox("Ask before closing FreeSub")
         self.ask_close.setChecked(bool(s["confirm_close"]))
         lay.addWidget(self.ask_close)
+        self.ask_actions = QCheckBox("Ask before Run and before deleting (clips, videos, projects)")
+        self.ask_actions.setChecked("*" not in (s.get("confirm_skip") or []))
+        lay.addWidget(self.ask_actions)
         lay.addSpacing(6)
         lay.addWidget(section("Where results go"))
-        lay.addWidget(label("The .srt files and exported videos are saved here. Work files (audio, voice clips…) "
-                            "stay in FreeSub's own folder and never clutter yours.", muted=True, wrap=True))
         lay.addWidget(self.r_video)
         lay.addWidget(row(self.r_custom, self.root, self.b_root))
         lay.addSpacing(6)
@@ -106,9 +107,6 @@ class SettingsDialog(QDialog):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setSpacing(10)
-        lay.addWidget(label("Google Translate needs no key and is used by default. Gemini and Cloudflare are AI "
-                            "services: they translate with the film's context and your names list. Both have a "
-                            "free tier.", muted=True, wrap=True))
         lay.addWidget(section("Google Gemini"))
         self.g_key = QLineEdit(s["gemini_key"])
         self.g_key.setEchoMode(QLineEdit.Password)
@@ -144,7 +142,6 @@ class SettingsDialog(QDialog):
         self.fallback = QCheckBox("If a service fails, use the other ones")
         self.fallback.setChecked(bool(s["translate_fallback"]))
         lay.addWidget(self.fallback)
-        lay.addWidget(label("Keys are kept in settings.json in Documents\\FreeSub Data, on this PC only.", muted=True, wrap=True))
         lay.addStretch(1)
         return w
 
@@ -173,8 +170,6 @@ class SettingsDialog(QDialog):
             c.setCurrentIndex(max(0, c.findData(value)))
             return c
 
-        lay.addWidget(label("Fast / Balanced / Best on the main screen choose these for you. Picking a model "
-                            "here makes Quality \"Custom\".", muted=True, wrap=True))
         lay.addWidget(section("Speech recognition"))
         self.a_model = QComboBox()
         for name, (_repo, size, note, _l) in models.WHISPER.items():
@@ -188,15 +183,11 @@ class SettingsDialog(QDialog):
         self.a_vad.setChecked(bool(s["whisper_vad"]))
         self.a_filt = QCheckBox("Drop made-up lines (\"thanks for watching\"...)")
         self.a_filt.setChecked(bool(s["whisper_filter"]))
-        self.a_chars = spin(16, 80, int(s["sub_max_chars"]))
-        self.a_dur = spin(2, 15, float(s["sub_max_duration"]), 0.5, " s", 1)
         lay.addWidget(form_row("Model", self.a_model, "Downloads on first use"))
         lay.addWidget(form_row("Beam size", self.a_beam, "Higher = a little more accurate, slower"))
         lay.addWidget(form_row("Run on", self.a_device))
         lay.addWidget(self.a_vad)
         lay.addWidget(self.a_filt)
-        lay.addWidget(form_row("Chars per line", self.a_chars))
-        lay.addWidget(form_row("Longest line", self.a_dur))
         lay.addSpacing(6)
         lay.addWidget(section("Reading hard subtitles (OCR)"))
         self.a_fps = spin(0.5, 10, float(s["ocr_fps"]), 0.5, " frames per second", 1)
@@ -283,11 +274,8 @@ class SettingsDialog(QDialog):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setSpacing(6)
-        intro = label("Models and parts FreeSub downloads when they are first needed. Get them here ahead "
-                      "of time, or again after a failed download.", muted=True, wrap=True)
-        intro.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.b_all = button("Download all", self._download_all, primary=True)
-        lay.addWidget(row(intro, self.b_all))
+        lay.addWidget(row(None, self.b_all))
         lay.addSpacing(4)
         self.dl_rows = {}
         heads = {"ffmpeg": "Needed", "gpu": "Graphics card", "whisper:tiny": "Speech recognition (Whisper)",
@@ -504,8 +492,7 @@ class SettingsDialog(QDialog):
             quality = "custom"
         s.update(whisper_model=model, whisper_beam=beam, whisper_quality=quality,
                  whisper_device=self.a_device.currentData(), whisper_vad=self.a_vad.isChecked(),
-                 whisper_filter=self.a_filt.isChecked(), sub_max_chars=self.a_chars.value(),
-                 sub_max_duration=self.a_dur.value(), ocr_fps=self.a_fps.value(), dub_max_speed=self.a_up.value(),
+                 whisper_filter=self.a_filt.isChecked(), ocr_fps=self.a_fps.value(), dub_max_speed=self.a_up.value(),
                  dub_join=self.a_join.isChecked(), dub_sync_subs=self.a_sync.isChecked(),
                  parallel_videos=self.a_lanes.currentData(),
                  export_encoder=self.a_enc.currentData(), export_container=self.a_cont.currentData(),
@@ -580,7 +567,8 @@ class SettingsDialog(QDialog):
         self._store_advanced()
         old_lang = ui_language()
         settings().update(native_titlebar=self.native_bar.isChecked(), language=self.lang.currentData(),
-                          confirm_close=self.ask_close.isChecked())
+                          confirm_close=self.ask_close.isChecked(),
+                          confirm_skip=[] if self.ask_actions.isChecked() else ["*"])
         if ui_language() != old_lang:
             self.restart = QMessageBox.question(self, "FreeSub", "Restart FreeSub now to use the new language?") \
                 == QMessageBox.Yes

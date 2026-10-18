@@ -23,6 +23,7 @@ from ..core.project import SRC_SRT, Project
 from ..core.subtitle import Cue, save_srt
 from ..langs import NO_SPACE
 from ..log import step_timer
+from ..translate import names
 from . import audio as audio_step
 from . import hallucination as hal
 from .voice_gender import classify
@@ -91,11 +92,20 @@ def _join(words) -> str:
 
 
 def _limits(lang):
+    """(per line, per subtitle, longest seconds). Counted in words; for languages written without spaces
+    (Chinese, Japanese, Thai...) in characters, twice the word count."""
     s = settings()
-    per_line = int(s["sub_max_chars"])
+    per_line = max(2, int(s["sub_max_words"]))
     if lang in NO_SPACE:
-        per_line = max(8, round(per_line * 0.45))
+        per_line *= 2
     return per_line, per_line * max(1, int(s["sub_max_lines"])), float(s["sub_max_duration"])
+
+
+def size_of(text: str, lang: str) -> int:
+    """Length the limits count: words, or characters for a language without spaces."""
+    if lang in NO_SPACE:
+        return len("".join(text.split()))
+    return len(text.split())
 
 
 def split_words(words, lang):
@@ -115,15 +125,15 @@ def split_words(words, lang):
 
     # 2) split what is still too long at the best point (punctuation, pause, balanced halves), recursively
     def fits(ws):
-        return len(_join(ws)) <= max_chars and ws[-1]["e"] - ws[0]["s"] <= max_dur
+        return size_of(_join(ws), lang) <= max_chars and ws[-1]["e"] - ws[0]["s"] <= max_dur
 
     def cut(ws):
         if len(ws) < 2 or fits(ws):
             return [ws]
-        total = len(_join(ws)) or 1
+        total = size_of(_join(ws), lang) or 1
         best, best_score = 1, -1e9
         for i in range(1, len(ws)):
-            left = len(_join(ws[:i]))
+            left = size_of(_join(ws[:i]), lang)
             prev = ws[i - 1]["w"].strip()
             score = -abs(2 * left - total) / total
             score += 0.45 if prev.endswith(PUNCT_END) else 0.25 if prev.endswith(PUNCT_ANY) else 0
@@ -136,11 +146,16 @@ def split_words(words, lang):
 
 
 def wrap(text: str, lang: str) -> str:
-    """Break a long cue into two balanced lines."""
+    """Break a long cue into balanced lines (at most Lines per subtitle)."""
     per_line, _, _ = _limits(lang)
     text = " ".join(text.split()) if lang not in NO_SPACE else text.replace("\n", "")
-    if len(text) <= per_line:
+    if size_of(text, lang) <= per_line or int(settings()["sub_max_lines"]) < 2:
         return text
+    lines = int(settings()["sub_max_lines"])
+    if lines >= 3 and size_of(text, lang) > per_line * 2 and lang not in NO_SPACE:
+        words = text.split()
+        n = -(-len(words) // 3)
+        return "\n".join(" ".join(words[i:i + n]) for i in range(0, len(words), n))
     mid = len(text) // 2
     if lang in NO_SPACE:
         best = None
@@ -355,7 +370,7 @@ def _transcribe(project, control, state, partial_path, lang_opt, wav):
             language=lang, task="transcribe", beam_size=int(s["whisper_beam"]),
             best_of=max(1, int(s["whisper_beam"])), word_timestamps=True,
             condition_on_previous_text=False,       # avoids long repetition loops
-            initial_prompt=(s["whisper_prompt"] or None),
+            initial_prompt=(names.whisper_hint() or None),       # the chosen name list
             vad_filter=bool(s["whisper_vad"]),
             vad_parameters=dict(threshold=float(s["whisper_vad_threshold"]), min_speech_duration_ms=250,
                                 min_silence_duration_ms=int(s["whisper_min_silence_ms"]), speech_pad_ms=300),

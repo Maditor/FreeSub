@@ -72,6 +72,7 @@ class AudioEngine(QObject):
         self.volume = 1.0
         self.muted = False
         self.quiet = False            # silent for a moment (the timeline is being dragged)
+        self.rate = 1.0               # the video's playback speed: the sound is read that much faster
         fmt = QAudioFormat()
         fmt.setSampleRate(RATE)
         fmt.setChannelCount(2)
@@ -132,7 +133,7 @@ class AudioEngine(QObject):
 
     def _want(self, buffered):
         """The sample the next write must start with: where the video will be when it is heard."""
-        return int((self.main.position() / 1000 + buffered) * RATE)
+        return int((self.main.position() / 1000 + buffered * self.rate) * RATE)
 
     def _flush(self):
         """Drop what is still queued (after a pause or a jump it belongs to the wrong moment)."""
@@ -154,19 +155,24 @@ class AudioEngine(QObject):
         self._playing = True
         buffered = self._buffered()
         want = self._want(buffered)
-        if abs(self.pos - want) > DRIFT * RATE:          # the video jumped: start over from there
+        if abs(self.pos - want) > DRIFT * RATE * max(1.0, self.rate):     # the video jumped: start over there
             self._flush()
             if self.io is None:
                 return
         n = min(self.sink.bytesFree() // 4, int(RATE * 0.1))
         if n <= 0:
             return
+        m = n if abs(self.rate - 1.0) < 1e-3 else max(1, int(round(n * self.rate)))   # samples of the video's time
         try:
-            x = self.source(self.pos, n)
+            x = self.source(self.pos, m)
         except Exception as e:  # noqa: BLE001
             log.warning("Narration preview: %s", e)
-            x = np.zeros((n, 2), dtype=np.float32)
+            x = np.zeros((m, 2), dtype=np.float32)
+        if m != n:                                       # another speed: m samples played in the time of n
+            at = np.linspace(0, m - 1, n)
+            src = np.arange(m)
+            x = np.stack([np.interp(at, src, x[:, c]) for c in range(x.shape[1])], axis=1).astype(np.float32)
         gain = 0.0 if (self.muted or self.quiet) else self.volume
         data = (np.clip(x * gain, -1, 1) * 32767).astype(np.int16).tobytes()
         self.io.write(data)
-        self.pos += n
+        self.pos += m

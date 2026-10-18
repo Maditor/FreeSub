@@ -7,6 +7,32 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPushButt
 from . import icons, theme
 
 
+class wait_cursor:
+    """The spinning cursor while something takes a moment, so it does not look stuck. Use as
+    `with wait_cursor():` or as a decorator. Nested uses are fine."""
+
+    def __enter__(self):
+        from PySide6.QtCore import QEventLoop
+        from PySide6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)      # show it before the work starts
+        return self
+
+    def __exit__(self, *_exc):
+        from PySide6.QtWidgets import QApplication
+        QApplication.restoreOverrideCursor()
+        return False
+
+    def __call__(self, fn):
+        import functools
+
+        @functools.wraps(fn)
+        def run(*a, **kw):
+            with wait_cursor():
+                return fn(*a, **kw)
+        return run
+
+
 class IconButton(QToolButton):
     """A flat button with one of FreeSub's own vector icons (icons.py) and a tooltip."""
 
@@ -348,3 +374,152 @@ class Segmented(QWidget):
         self.ring.update()
         if emit:
             self.changed.emit(key)
+
+
+class Marquee(QWidget):
+    """One line of text in a fixed room: when it is longer, it runs from right to left without end."""
+    GAP = 48            # px between the end of the text and its next start
+    SPEED = 1           # px per tick
+
+    def __init__(self, width: int = 340, muted=True):
+        super().__init__()
+        from PySide6.QtCore import QTimer
+        self._text = ""
+        self._x = 0
+        self._muted = muted
+        self.setFixedWidth(width)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self._timer = QTimer(self)
+        self._timer.setInterval(30)
+        self._timer.timeout.connect(self._tick)
+        self._wait = 0
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str):
+        from ..i18n import tr
+        text = tr(text or "")
+        if text == self._text:
+            return
+        self._text = text
+        self._x = 0
+        self._wait = 60                     # stays still a moment first, so the start can be read
+        self.setToolTip(text)
+        self._update_timer()
+        self.update()
+
+    def _long(self) -> bool:
+        return self.fontMetrics().horizontalAdvance(self._text) > self.width()
+
+    def _update_timer(self):
+        if self._long() and self.isVisible():
+            self._timer.start()
+        else:
+            self._timer.stop()
+            self._x = 0
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._update_timer()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._timer.stop()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._update_timer()
+
+    def _tick(self):
+        if self._wait > 0:
+            self._wait -= 1
+            return
+        loop = self.fontMetrics().horizontalAdvance(self._text) + self.GAP
+        self._x = (self._x + self.SPEED) % loop
+        if self._x == 0:
+            self._wait = 60                 # back at the start: a pause again
+        self.update()
+
+    def sizeHint(self):
+        from PySide6.QtCore import QSize
+        return QSize(self.width(), self.fontMetrics().height() + 4)
+
+    def paintEvent(self, _e):
+        from PySide6.QtGui import QLinearGradient, QPainter
+        p = QPainter(self)
+        c = theme.colors()
+        p.setPen(QColor(c["muted"] if self._muted else c["fg"]))
+        h = self.height()
+        if not self._long():
+            p.drawText(0, 0, self.width(), h, Qt.AlignVCenter | Qt.AlignLeft, self._text)
+            p.end()
+            return
+        w = self.fontMetrics().horizontalAdvance(self._text)
+        x = -self._x
+        while x < self.width():
+            p.drawText(x, 0, w + 4, h, Qt.AlignVCenter | Qt.AlignLeft, self._text)
+            x += w + self.GAP
+        # soft ends, so the text fades in and out instead of being cut
+        bg = QColor(c["bg"])                    # the command bar's colour
+        for left in (True, False):
+            g = QLinearGradient(0 if left else self.width(), 0, 18 if left else self.width() - 18, 0)
+            g.setColorAt(0, bg)
+            clear = QColor(bg)
+            clear.setAlpha(0)
+            g.setColorAt(1, clear)
+            p.fillRect(0 if left else self.width() - 18, 0, 18, h, g)
+        p.end()
+
+
+def confirm(parent, text: str, key: str = "", yes: str = "", danger: bool = False) -> bool:
+    """Ask before an important action (Run, deleting...). key: the action's name; "Don't ask again" skips it
+    from then on (Settings → General brings every question back). danger: No is the default button."""
+    from PySide6.QtWidgets import QCheckBox, QMessageBox
+    from ..config import settings
+    skip = list(settings().get("confirm_skip") or [])
+    if key and (key in skip or "*" in skip):
+        return True
+    box = QMessageBox(QMessageBox.Question, "FreeSub", text, QMessageBox.Yes | QMessageBox.No, parent)
+    if yes:
+        box.button(QMessageBox.Yes).setText(yes)
+    box.setDefaultButton(QMessageBox.No if danger else QMessageBox.Yes)
+    again = None
+    if key:
+        again = QCheckBox("Don't ask again")
+        box.setCheckBox(again)
+    ok = box.exec() == QMessageBox.Yes
+    if ok and again is not None and again.isChecked():
+        settings().update(confirm_skip=skip + [key])
+    return ok
+
+
+from PySide6.QtWidgets import QComboBox as _QComboBox  # noqa: E402
+
+
+class MenuPicker(_QComboBox):
+    """Looks exactly like the other drop-down boxes, but opens a menu (choices + actions like 'New list…').
+    setText() shows the chosen one."""
+
+    def __init__(self):
+        super().__init__()
+        self._menu = None
+        self.addItem("")
+
+    def setMenu(self, menu):
+        self._menu = menu
+
+    def setText(self, text: str):
+        self.setItemText(0, text)
+
+    def text(self) -> str:
+        return self.itemText(0)
+
+    def showPopup(self):
+        if self._menu is None:
+            return
+        self._menu.setMinimumWidth(self.width())
+        self._menu.exec(self.mapToGlobal(self.rect().bottomLeft()))
+
+    def wheelEvent(self, e):
+        e.ignore()                                     # never changes by scrolling past it

@@ -1,9 +1,10 @@
-"""Left column: the videos to work on (files or whole folders), their status, right-click actions."""
+"""Left column (Media): the open project's videos, numbered, in order (drag one to move it, or onto the
+timeline), their status, right-click actions."""
 import os
 import subprocess
 import threading
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPixmap
 from ..i18n import tr
 from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QListView, QListWidget, QListWidgetItem, QMenu,
@@ -14,7 +15,7 @@ from ..core import ffmpeg
 from ..core.project import Project
 from ..core.subtitle import fmt_clock
 from . import icons, theme
-from .widgets import IconButton, hline, label, row
+from .widgets import IconButton, hline, label, row, wait_cursor
 
 THUMB = QSize(96, 54)           # grid view: a 16:9 picture of each video, its name under it
 CELL = QSize(102, 82)  # two per row in the 250 px column (Qt keeps room for a scroll bar)
@@ -62,15 +63,202 @@ def open_folder(path: str, select: str | None = None):
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
+class _MediaList(QListWidget):
+    """The list itself: a video dragged inside it moves (a line shows where; its number changes); dragged out,
+    it goes onto the timeline (copied, never taken out of here). Files dropped on it from Explorer are added.
+    Dragging on an empty spot draws a frame that selects every video it touches."""
+    moved = Signal()
+    files_dropped = Signal(list)
+
+    def __init__(self):
+        super().__init__()
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(False)              # our own line (Qt's does not show in the grid)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.setDefaultDropAction(Qt.CopyAction)
+        self.setSelectionRectVisible(False)            # our own frame (below): it also starts beside a name
+        self._drop_row = None
+        self._band = None                              # (start point, QRubberBand, selection before)
+
+    # ------------------------------------------------------------ selecting with a frame (as in Explorer)
+    def _blank(self, pos) -> bool:
+        """Nothing under the mouse: an empty spot, or (list view) to the right of a video's name."""
+        it = self.itemAt(pos)
+        if it is None:
+            return True
+        if self.viewMode() == QListView.IconMode:
+            return False
+        r = self.visualItemRect(it)
+        fm = self.fontMetrics()
+        text_w = max((fm.horizontalAdvance(t) for t in it.text().split("\n")), default=0)
+        return pos.x() > r.left() + text_w + 24
+
+    def mousePressEvent(self, e):
+        pos = e.position().toPoint()
+        if e.button() == Qt.LeftButton and self._blank(pos):
+            from PySide6.QtWidgets import QRubberBand
+            keep = e.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier)
+            before = {self.row(i) for i in self.selectedItems()} if keep else set()
+            if not keep:
+                self.clearSelection()
+            band = QRubberBand(QRubberBand.Rectangle, self.viewport())
+            band.setGeometry(pos.x(), pos.y(), 1, 1)
+            band.show()
+            self._band = (pos, band, before)
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._band is not None:
+            from PySide6.QtCore import QRect
+            start, band, before = self._band
+            rect = QRect(start, e.position().toPoint()).normalized()
+            band.setGeometry(rect)
+            for i in range(self.count()):
+                it = self.item(i)
+                it.setSelected(i in before or self.visualItemRect(it).intersects(rect))
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._band is not None:
+            _start, band, _before = self._band
+            band.hide()
+            band.deleteLater()
+            self._band = None
+            sel = self.selectedItems()
+            if sel and self.currentItem() not in sel:     # the player shows one of them
+                self.setCurrentItem(sel[0], QItemSelectionModel.NoUpdate)
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    @staticmethod
+    def _files(e):
+        md = e.mimeData()
+        if not md.hasUrls():
+            return []
+        out = [u.toLocalFile() for u in md.urls() if u.isLocalFile()]
+        return [p for p in out if os.path.isdir(p) or p.lower().endswith(ffmpeg.MEDIA_EXTS)]
+
+    def dragEnterEvent(self, e):
+        if e.source() is self:
+            e.setDropAction(Qt.MoveAction)
+            e.accept()
+        elif self._files(e):
+            e.setDropAction(Qt.CopyAction)
+            e.accept()
+        else:
+            e.ignore()                                # anything else (an .srt): the window takes it
+
+    def dragMoveEvent(self, e):
+        if e.source() is self:
+            e.setDropAction(Qt.MoveAction)
+            e.accept()
+            row = self._target_row(e.position().toPoint())
+            if row != self._drop_row:
+                self._drop_row = row
+                self.viewport().update()
+        elif self._files(e):
+            e.setDropAction(Qt.CopyAction)
+            e.accept()
+        else:
+            e.ignore()
+
+    def dragLeaveEvent(self, e):
+        self._drop_row = None
+        self.viewport().update()
+        super().dragLeaveEvent(e)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self._drop_row is None or not self.count():
+            return
+        grid = self.viewMode() == QListView.IconMode
+        last = self._drop_row >= self.count()
+        r = self.visualItemRect(self.item(self.count() - 1 if last else self._drop_row))
+        p = QPainter(self.viewport())
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(theme.colors()["accent"]))
+        if grid:                                       # a bar left (or right) of the cell
+            x = r.right() + 1 if last else r.left() - 1
+            p.drawRoundedRect(x - 2, r.top() + 2, 4, r.height() - 4, 2, 2)
+        else:                                          # a line above (or under) the row
+            y = r.bottom() + 1 if last else r.top() - 1
+            p.drawRoundedRect(r.left() + 4, y - 2, r.width() - 8, 4, 2, 2)
+        p.end()
+
+    def move_selected(self, to: int):
+        """Move the selected videos (kept in their order) to row to (counted before they are taken out)."""
+        rows = sorted(self.row(i) for i in self.selectedItems())
+        if not rows:
+            return
+        cur = self.currentItem()
+        items = [self.takeItem(r) for r in reversed(rows)][::-1]
+        to = max(0, min(to - sum(1 for r in rows if r < to), self.count()))
+        self.blockSignals(True)
+        for k, it in enumerate(items):
+            self.insertItem(to + k, it)
+            it.setSelected(True)
+        if cur is not None:
+            self.setCurrentItem(cur)
+        self.blockSignals(False)
+        self.moved.emit()
+
+    def step_selected(self, way: int):
+        rows = sorted(self.row(i) for i in self.selectedItems())
+        if not rows:
+            return
+        if way < 0 and rows[0] > 0:
+            self.move_selected(rows[0] - 1)
+        elif way > 0 and rows[-1] < self.count() - 1:
+            self.move_selected(rows[-1] + 2)
+
+    def keyPressEvent(self, e):
+        if e.modifiers() & Qt.AltModifier and e.key() in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right):
+            self.step_selected(-1 if e.key() in (Qt.Key_Up, Qt.Key_Left) else 1)    # Alt + arrow: move it
+            return
+        super().keyPressEvent(e)
+
+    def _target_row(self, pos) -> int:
+        it = self.itemAt(pos)
+        if it is None:
+            return self.count()
+        r = self.visualItemRect(it)
+        row = self.row(it)
+        after = pos.x() > r.center().x() if self.viewMode() == QListView.IconMode else pos.y() > r.center().y()
+        return row + 1 if after else row
+
+    def dropEvent(self, e):
+        self._drop_row = None
+        self.viewport().update()
+        if e.source() is not self:
+            files = self._files(e)
+            if files:
+                e.setDropAction(Qt.CopyAction)
+                e.accept()
+                self.files_dropped.emit(files)
+            else:
+                e.ignore()
+            return
+        self.move_selected(self._target_row(e.position().toPoint()))
+        e.setDropAction(Qt.CopyAction)                # handled here: Qt must not take anything out
+        e.accept()
+
+
 class Queue(QWidget):
     current_changed = Signal(str)
     imported = Signal(str)
     reset_requested = Signal(str)
+    changed = Signal()                  # videos added, removed or moved (the project keeps the list)
 
     def __init__(self):
         super().__init__()
         self.infos = {}
-        self.list = QListWidget()
+        self.list = _MediaList()
         self.list.setObjectName("Queue")
         self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -96,6 +284,8 @@ class Queue(QWidget):
         lay.addWidget(self.empty)
         lay.addWidget(self.info)
         self.b_remove.clicked.connect(self.remove_selected)
+        self.list.moved.connect(self._moved)
+        self.list.files_dropped.connect(self.add_paths)
         self.list.currentItemChanged.connect(self._current)
         self.list.customContextMenuRequested.connect(self._menu)
         self.set_view(settings()["queue_view"] if settings()["queue_view"] in ("list", "grid") else "list")
@@ -116,6 +306,10 @@ class Queue(QWidget):
         lw.setWrapping(grid)
         lw.setResizeMode(QListView.Adjust)
         lw.setMovement(QListView.Static)
+        lw.setDragEnabled(True)                  # (Static switches dragging off) moved here, or onto the timeline
+        lw.setAcceptDrops(True)
+        lw.setDragDropMode(QAbstractItemView.DragDrop)
+        lw.setDefaultDropAction(Qt.CopyAction)
         lw.setIconSize(THUMB if grid else QSize(0, 0))
         lw.setGridSize(CELL if grid else QSize())
         if grid:
@@ -182,7 +376,21 @@ class Queue(QWidget):
         it = self.list.currentItem()
         return it.data(Qt.UserRole) if it else ""
 
-    def add_paths(self, paths) -> int:
+    def _moved(self):
+        self.update_all()                         # the numbers
+        self.changed.emit()
+
+    def set_videos(self, videos):
+        """The open project's videos (in its order)."""
+        self.list.blockSignals(True)
+        self.list.clear()
+        self.list.blockSignals(False)
+        self.add_paths(list(videos), emit=False)
+        self.empty.setVisible(self.list.count() == 0)
+        if not self.list.count():
+            self.current_changed.emit("")
+
+    def add_paths(self, paths, emit=True) -> int:
         known = set(self.videos())
         found = []
         for p in paths:
@@ -215,6 +423,8 @@ class Queue(QWidget):
         if first and not self.list.currentItem():
             self.list.setCurrentItem(first)
         self.empty.setVisible(self.list.count() == 0)
+        if emit and first is not None:
+            self.changed.emit()
         return len(found)
 
     def update_item(self, it=None, video=None):
@@ -227,7 +437,7 @@ class Queue(QWidget):
             return
         v = it.data(Qt.UserRole)
         st = tr(Project(v).summary())
-        name = os.path.basename(v)
+        name = f"{self.list.row(it) + 1}. {os.path.basename(v)}"
         if self.view == "grid":
             it.setText(name)
             it.setIcon(self._icon_for(v))
@@ -261,9 +471,20 @@ class Queue(QWidget):
                 QMessageBox.information(self, "FreeSub", "No video or audio files in this folder.")
 
     def remove_selected(self):
+        sel = self.list.selectedItems()
+        if not sel:
+            return
+        from .widgets import confirm
+        text = (tr("Remove {a} from the project?").replace("{a}", os.path.basename(sel[0].data(Qt.UserRole)))
+                if len(sel) == 1 else tr("Remove {a} videos from the project?").replace("{a}", str(len(sel))))
+        if not confirm(self, text + "\n" + tr("(The video files and their work are kept.)"), "media_remove",
+                       tr("Remove"), danger=True):
+            return
         for it in self.list.selectedItems():
             self.list.takeItem(self.list.row(it))
+        self.update_all()
         self.empty.setVisible(self.list.count() == 0)
+        self.changed.emit()
         if not self.list.count():
             self.current_changed.emit("")
 
@@ -298,6 +519,9 @@ class Queue(QWidget):
         it = self.list.itemAt(pos)
         if not it:
             return
+        if not it.isSelected():                        # the menu is for the video under the mouse
+            self.list.clearSelection()
+            it.setSelected(True)
         v = it.data(Qt.UserRole)
         p = Project(v)
         m = QMenu(self)
@@ -306,6 +530,13 @@ class Queue(QWidget):
         m.addAction("Use my own .srt as the original", lambda: self.import_srt(v))
         m.addAction("Use my own .srt as the translation", lambda: self.import_srt(v, "translation"))
         m.addSeparator()
+        n, row = self.list.count(), self.list.row(it)
+        if n > 1:
+            mv = m.addMenu("Move")
+            mv.addAction("To the top", lambda: self.list.move_selected(0)).setEnabled(row > 0)
+            mv.addAction("Up  (Alt+↑)", lambda: self.list.step_selected(-1)).setEnabled(row > 0)
+            mv.addAction("Down  (Alt+↓)", lambda: self.list.step_selected(1)).setEnabled(row < n - 1)
+            mv.addAction("To the bottom", lambda: self.list.move_selected(n)).setEnabled(row < n - 1)
         m.addAction("Start this video again (delete its work files)", lambda: self.reset_requested.emit(v))
         m.addAction("Remove from the list", self.remove_selected)
         m.exec(self.list.mapToGlobal(pos))
@@ -322,7 +553,8 @@ class Queue(QWidget):
             return
         from ..steps.transcribe import import_srt, import_translation
         try:
-            (import_translation if kind == "translation" else import_srt)(Project(v), path)
+            with wait_cursor():
+                (import_translation if kind == "translation" else import_srt)(Project(v), path)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "FreeSub", f"Could not use that file:\n{e}")
             return

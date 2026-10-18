@@ -44,19 +44,38 @@ def balanced(text: str, measure, n: int):
     return lines, max(measure(l) for l in lines)
 
 
-def fit(text: str, measure_for_size, max_w: float, size: int, box_h: float | None = None, max_lines: int = 3):
-    """Fewest lines that fit max_w. In a box the text gets smaller with more lines (box height / lines), the
-    same rule the export uses. measure_for_size(px) -> measure function for that font size."""
+def _words_ok(lines, max_words: int) -> bool:
+    if not max_words:
+        return True
+    for line in lines:
+        n = len(line.split()) if " " in line.strip() else len(line.strip()) / 2   # no spaces: 2 characters a word
+        if n > max_words:
+            return False
+    return True
+
+
+def fit(text: str, measure_for_size, max_w: float, size: int, box_h: float | None = None, max_lines: int = 2,
+        max_words: int = 0):
+    """Fewest lines (up to max_lines) that fit max_w and have at most max_words words each. In a box the text
+    gets smaller with more lines (box height / lines), the same rule the export uses.
+    measure_for_size(px) -> measure function for that font size."""
     if not text.strip():
         return text
     best = None
-    for n in range(1, max_lines + 1):
+    for n in range(1, max(1, max_lines) + 1):
         px = int(min(size, box_h / (n * 1.25))) if box_h else size
         lines, widest = balanced(text, measure_for_size(max(8, px)), n)
         best = lines
-        if widest <= max_w:
+        if widest <= max_w and _words_ok(lines, max_words):
             break
     return "\n".join(best)
+
+
+def limits_text():
+    """(lines per subtitle, words per line) from Style."""
+    from ..config import settings
+    s = settings()
+    return max(1, int(s["sub_max_lines"])), max(2, int(s["sub_max_words"]))
 
 
 # ------------------------------------------------------------------ fitting a whole file (no window needed)
@@ -144,9 +163,10 @@ def fit_srt(project, work_name: str) -> int:
         return 0
     max_w, box_h, st = limits(project)
     measure_for = file_measurer(st["font"], st["bold"])
+    n_lines, n_words = limits_text()
     changed = 0
     for c in cues:
-        new = fit(c.text, measure_for, max_w, st["size"], box_h)
+        new = fit(c.text, measure_for, max_w, st["size"], box_h, n_lines, n_words)
         if new != c.text:
             c.text = new
             changed += 1

@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (QGraphicsItem, QGraphicsRectItem, QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget)
 
 from ..config import settings
-from ..core.style import sub_style
+from ..i18n import Keep, tr
+from ..core.style import box_look, sub_style
 from ..core.subtitle import cue_at, fmt_clock
 from . import theme
 from .widgets import IconButton
@@ -137,6 +138,11 @@ class SubtitleItem(QGraphicsItem):
         self.rect = QRectF(0, 0, 1280, 720)
         self.box = None            # QRectF of the dialogue box (scene / video pixels) or None
         self.backdrop = None       # blurred QPixmap of the picture under the box
+        self.hit = None            # where the lines (or the box) are: grabbed there to move them
+        self.drag_offset = None    # QPointF while being dragged: drawn there before it is saved
+        self.playing = False       # frames keep coming: the blur under a dragged box can follow it
+        self.guides = (False, False)
+        self.look = None           # the line on screen has a look of its own (the timeline)   # while dragging: centred across (vertical line) / up-down (horizontal)
         self.setZValue(10)
 
     def set_rect(self, rect: QRectF):
@@ -172,21 +178,45 @@ class SubtitleItem(QGraphicsItem):
             y += lh
         return path
 
+    def _paint_guides(self, p: QPainter):
+        vert, horiz = self.guides
+        if not (vert or horiz):
+            return
+        r = self.rect
+        pen = QPen(QColor(theme.colors()["accent"]), 1.5, Qt.DashLine)
+        pen.setCosmetic(True)
+        p.setPen(pen)
+        if vert:
+            p.drawLine(QPointF(r.center().x(), r.top()), QPointF(r.center().x(), r.bottom()))
+        if horiz:
+            p.drawLine(QPointF(r.left(), r.center().y()), QPointF(r.right(), r.center().y()))
+        p.setPen(Qt.NoPen)
+
     def paint(self, p: QPainter, _opt, _w=None):
+        self._paint_subs(p)
+        self._paint_guides(p)                    # on top of the box
+
+    def _paint_subs(self, p: QPainter):
+        self.hit = None
         if not self.text and self.box is None:
             return
-        s = settings()
         r = self.rect
-        st = sub_style(r.height())
+        st = sub_style(r.height(), self.look)
         p.setRenderHint(QPainter.Antialiasing)
         font = qt_font(st["font"], st["bold"])
         lines = self.text.split("\n")
         font.setPixelSize(st["size"])
         if self.box is not None:                 # OCR: the read area becomes the dialogue box
-            b = self.box
-            if self.backdrop is not None:
+            b = QRectF(self.box)
+            if self.drag_offset is not None:
+                b.translate(self.drag_offset)
+            self.hit = QRectF(b)
+            if self.backdrop is not None and (self.drag_offset is None or self.playing):
                 p.drawPixmap(b, self.backdrop, QRectF(self.backdrop.rect()))
-            p.fillRect(b, QColor(0, 0, 0, int(255 * float(s["ocr_box_opacity"]) / 100)))
+            bl = box_look(self.look, [0, 0, 1, 1])
+            fill = QColor(bl["color"])
+            fill.setAlpha(int(255 * bl["opacity"]))
+            p.fillRect(b, fill)
             if not self.text:                    # "Always visible": the box stays between lines
                 return
             font.setPixelSize(max(8, int(min(st["size"], b.height() / (len(lines) * 1.25)))))
@@ -199,7 +229,11 @@ class SubtitleItem(QGraphicsItem):
         else:
             fm = QFontMetricsF(font)
             lh = fm.height() * 1.05
-            cx, top = r.center().x(), r.bottom() - st["margin_v"] - lh * len(lines)
+            cx, top = r.left() + r.width() * st["pos_x"], r.bottom() - st["margin_v"] - lh * len(lines)
+            if self.drag_offset is not None:
+                cx, top = cx + self.drag_offset.x(), top + self.drag_offset.y()
+            wide = max(fm.horizontalAdvance(l) for l in lines)
+            self.hit = QRectF(cx - wide / 2 - 6, top - 4, wide + 12, lh * len(lines) + 8)
         path = self._path(lines, font, cx, top, lh)
         if st["outline"]:
             width = st["outline"] * 2 * font.pixelSize() / max(1, st["size"])
@@ -236,9 +270,17 @@ class RegionItem(QGraphicsRectItem):
         self.label.setPos(rect.left() + 4, rect.top() - self.label.boundingRect().height() - 2)
 
 
+SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
+
+
+def _speed_text(x: float) -> str:
+    return f"{x:g}×"
+
+
 class VideoView(QGraphicsView):
     zoom_changed = Signal(float)
     region_drawn = Signal(QRectF)
+    subs_moved = Signal(QPointF, bool)  # scene pixels the lines (or the box: True) were dragged by
 
     def __init__(self):
         super().__init__()
@@ -253,6 +295,10 @@ class VideoView(QGraphicsView):
         self.scene_.addItem(self.region)
         self.drawing = False
         self._origin = None
+        self._grab = None                   # scene point where the subtitles were grabbed
+        self.grab_box = False               # what was grabbed: the box (True) or the lines
+        self.locked = False                 # work running: the lines and the box stay where they are
+        self.setMouseTracking(True)
         self.message = self.scene_.addText("")
         self.message.setZValue(20)
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
@@ -347,7 +393,34 @@ class VideoView(QGraphicsView):
         r = QRectF(self.video.pos(), self.video.size())
         return QPointF(min(max(pt.x(), r.left()), r.right()), min(max(pt.y(), r.top()), r.bottom()))
 
+    def _snap(self, off: QPointF) -> QPointF:
+        """Near the middle of the picture (across or up-down) it clicks into place, and a guide line shows."""
+        r = QRectF(self._grab_rect).translated(off)
+        v = QRectF(self.video.pos(), self.video.size())
+        reach = 8 / max(0.05, self.transform().m11())             # 8 screen pixels, at any zoom
+        vert = abs(r.center().x() - v.center().x()) <= reach
+        horiz = abs(r.center().y() - v.center().y()) <= reach
+        if vert:
+            off.setX(off.x() + v.center().x() - r.center().x())
+        if horiz:
+            off.setY(off.y() + v.center().y() - r.center().y())
+        self.subs.guides = (vert, horiz)
+        return off
+
+    def dragging(self) -> bool:
+        return self._grab is not None
+
+    def _over_subs(self, e) -> bool:
+        hit = self.subs.hit
+        return bool(hit) and self.subs.isVisible() and hit.contains(self.mapToScene(e.position().toPoint()))
+
     def mousePressEvent(self, e):
+        if not self.drawing and e.button() == Qt.LeftButton and self._over_subs(e) and not self.locked:
+            self._grab = self.mapToScene(e.position().toPoint())          # move the lines / the box
+            self._grab_rect = QRectF(self.subs.hit)
+            self.grab_box = self.subs.box is not None
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+            return
         if self.drawing and e.button() == Qt.LeftButton:
             self._origin = self._clamp(self.mapToScene(e.position().toPoint()))
             self.region.set_rect(QRectF(self._origin, self._origin))
@@ -356,6 +429,15 @@ class VideoView(QGraphicsView):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
+        if self._grab is not None:
+            self.subs.drag_offset = self._snap(self.mapToScene(e.position().toPoint()) - self._grab)
+            self.subs.update()
+            return
+        if not self.drawing:
+            if self._over_subs(e):
+                self.viewport().setCursor(Qt.OpenHandCursor)
+            elif self.viewport().cursor().shape() == Qt.OpenHandCursor:
+                self.viewport().unsetCursor()
         if self.drawing and self._origin is not None:
             pt = self._clamp(self.mapToScene(e.position().toPoint()))
             self.region.set_rect(QRectF(self._origin, pt).normalized())
@@ -363,6 +445,16 @@ class VideoView(QGraphicsView):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if self._grab is not None and e.button() == Qt.LeftButton:
+            moved = self._snap(self.mapToScene(e.position().toPoint()) - self._grab)
+            self._grab = None
+            self.subs.drag_offset = None
+            self.subs.guides = (False, False)
+            self.viewport().setCursor(Qt.OpenHandCursor)
+            if abs(moved.x()) + abs(moved.y()) > 2:
+                self.subs_moved.emit(moved, self.grab_box)
+            self.subs.update()
+            return
         if self.drawing and self._origin is not None and e.button() == Qt.LeftButton:
             rect = self.region.rect()
             self.stop_drawing()
@@ -376,6 +468,8 @@ class Preview(QWidget):
     end_reached = Signal()                 # played to the end of what the file has (a growing preview copy)
     position_changed = Signal(float)       # seconds
     region_selected = Signal(list)         # [x, y, w, h] fractions of the picture
+    box_moved = Signal(list)               # the box dragged somewhere else: [x, y, w, h] fractions
+    style_moved = Signal()                 # the lines dragged (sub_pos_x / sub_margin changed)
 
     def __init__(self):
         super().__init__()
@@ -385,6 +479,10 @@ class Preview(QWidget):
         self.fps = 30.0
         self._seeking = False
         self.region = None                 # [x, y, w, h] fractions
+        self.box_area = None               # where the box is drawn (moved by hand, else the region)
+        self.sample_look = None            # the line chosen on the timeline: the sample shows its look
+        self.cur_area = None               # the box of the line on screen (its own, or the video's)
+        self.line_mode = False             # a line is chosen on the timeline: dragging moves that line only
         self.show_region = False
         self.box_mode = False
 
@@ -438,22 +536,51 @@ class Preview(QWidget):
         self.b_fit = IconButton("fit", "Fit to window (double-click the label: 100%)")
         self.b_area = IconButton("area", "Draw the subtitle area (for reading hard subtitles)", checkable=True)
 
+        # playback speed: the preview plays at it, and the export is made at it (the whole project)
+        from PySide6.QtGui import QActionGroup
+        from PySide6.QtWidgets import QMenu, QToolButton
+        self.b_speed = QToolButton()
+        self.b_speed.setObjectName("SpeedButton")
+        self.b_speed.setToolTip("Playback speed: the exported video is made at this speed too")
+        self.b_speed.setPopupMode(QToolButton.InstantPopup)
+        self.b_speed.setCursor(Qt.PointingHandCursor)
+        self.speed_menu = QMenu(self.b_speed)
+        group = QActionGroup(self.speed_menu)
+        self.speed_actions = {}
+        for x in SPEEDS:
+            a = self.speed_menu.addAction(Keep(_speed_text(x) + ("   " + tr("Normal") if x == 1.0 else "")))
+            a.setCheckable(True)
+            group.addAction(a)
+            a.triggered.connect(lambda _c=False, v=x: self.set_speed(v))
+            self.speed_actions[x] = a
+        self.b_speed.setMenu(self.speed_menu)
+
         bar = QHBoxLayout()
-        bar.setContentsMargins(8, 4, 8, 4)
+        bar.setContentsMargins(6, 4, 8, 4)
         bar.setSpacing(2)
-        for w in (self.b_prev, self.b_back, self.b_play, self.b_fwd, self.b_next):
-            bar.addWidget(w)
-        bar.addSpacing(8)
-        bar.addWidget(self.slider, 1)
+        for w in (self.b_prev, self.b_back, self.b_fwd, self.b_next):
+            w.setVisible(False)                  # kept for the keys (arrows); only Play / pause is shown
+        bar.addWidget(self.b_play)
+        bar.addSpacing(4)
+        bar.addWidget(self.b_speed)
+        bar.addSpacing(10)
         bar.addWidget(self.time)
-        bar.addSpacing(8)
-        for w in (self.b_area, self.b_mix, self.b_cc, self.b_vol, self.vol, self.b_zout, self.zoom_label, self.b_zin, self.b_fit):
+        bar.addStretch(1)
+        self.time.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        seek_row = QHBoxLayout()                 # the seek bar: its own row, the whole width
+        seek_row.setContentsMargins(10, 6, 10, 0)
+        seek_row.addWidget(self.slider)
+        self.b_timeline = IconButton("timeline", "Timeline: put clips of the videos one after another, cut them, "
+                                     "move the lines, give a line its own look", checkable=True)
+        self.b_area.setVisible(False)            # drawn from Style → Box → Area (or Steps → OCR)
+        for w in (self.b_timeline, self.b_area, self.b_mix, self.b_cc, self.b_vol, self.vol, self.b_zout, self.zoom_label, self.b_zin, self.b_fit):
             bar.addWidget(w)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(self.view, 1)
+        lay.addLayout(seek_row)
         lay.addLayout(bar)
 
         self.b_play.clicked.connect(self.toggle)
@@ -471,6 +598,7 @@ class Preview(QWidget):
         self.view.zoom_changed.connect(self._zoom_label)
         self.b_area.toggled.connect(self._area_tool)
         self.view.region_drawn.connect(self._region_drawn)
+        self.view.subs_moved.connect(self._subs_moved)
         self.view.video.nativeSizeChanged.connect(lambda _s: self._place_region())
         self.view.video.videoSink().videoFrameChanged.connect(self._frame)
         self.slider.sliderPressed.connect(self._drag_start)
@@ -546,6 +674,7 @@ class Preview(QWidget):
             return
         self.view.show_message("")
         self.player.setSource(QUrl.fromLocalFile(os.path.abspath(media)))
+        self.sync_speed()
         self.set_enabled(True)
         # show the first frame
         self.player.pause()
@@ -591,6 +720,32 @@ class Preview(QWidget):
         if nxt:
             self.seek(nxt.start + 0.01)
 
+    # ------------------------------------------------------------ playback speed
+    def set_speed(self, x: float, save: bool = True):
+        """0.25 - 2: the video (and the narration preview) play at it. save: kept for the project (Style)."""
+        x = min(2.0, max(0.25, float(x)))
+        if save:
+            settings().update(video_speed=x)
+        self.player.setPlaybackRate(x)
+        self.engine.rate = x
+        self.b_speed.setText(Keep(_speed_text(x)))
+        changed = abs(x - 1.0) > 1e-3
+        if self.b_speed.property("changed") != changed:
+            self.b_speed.setProperty("changed", changed)        # another speed than normal: shown in colour
+            self.b_speed.style().unpolish(self.b_speed)
+            self.b_speed.style().polish(self.b_speed)
+        a = self.speed_actions.get(round(x, 2))
+        if a is not None:
+            a.setChecked(True)
+
+    def sync_speed(self):
+        """The open project's speed (after a video or a project was opened)."""
+        try:
+            x = float(settings()["video_speed"])
+        except (TypeError, ValueError):
+            x = 1.0
+        self.set_speed(x, save=False)
+
     def set_enabled(self, on: bool):
         for w in (self.b_play, self.b_back, self.b_fwd, self.b_prev, self.b_next, self.slider, self.b_mix):
             w.setEnabled(on)
@@ -624,34 +779,36 @@ class Preview(QWidget):
         self._place_region()
         self.region_selected.emit(self.region)
 
-    def set_region(self, region, show: bool, box_mode: bool):
+    def set_region(self, region, show: bool, box_mode: bool, box_area=None):
         self.region = list(region) if region else None
+        self.box_area = list(box_area) if box_area else self.region
         self.show_region = show
-        self.box_mode = box_mode and bool(region)
-        self.b_area.setVisible(show)
+        self.box_mode = box_mode
+        self.b_area.setVisible(False)
         self._place_region()
         self._update_sub(self.player.position() / 1000)
 
-    def _region_rect(self):
-        if not self.region:
+    def _region_rect(self, region=None):
+        region = region or self.region
+        if not region:
             return None
         size = self.view.video.size()
-        x, y, w, h = self.region
+        x, y, w, h = region
         o = self.view.video.pos()
         return QRectF(o.x() + x * size.width(), o.y() + y * size.height(), w * size.width(), h * size.height())
 
     def _place_region(self):
         r = self._region_rect()
-        self.view.region.setVisible(bool(r) and self.show_region and not self.box_mode_active())
+        self.view.region.setVisible(bool(r) and self.show_region and not self.box_mode)
         if r:
             self.view.region.set_rect(r)
 
     def box_mode_active(self):
-        return self.box_mode and (bool(self.view.subs.text) or bool(settings()["sub_box_always"]))
+        return self.view.subs.box is not None
 
     def _frame(self, frame):
         """Blurred copy of the picture under the dialogue box (only while a line is shown)."""
-        if not (self.box_mode_active() and self.region):
+        if not (self.box_mode_active() and (self.cur_area or self.box_area or self.region)):
             return
         try:
             img = frame.toImage()
@@ -659,11 +816,16 @@ class Preview(QWidget):
             return
         if img.isNull():
             return
-        x, y, w, h = self.region
+        x, y, w, h = self.cur_area or self.box_area or self.region
+        off = self.view.subs.drag_offset                 # being dragged: the picture under where it is now
+        size = self.view.video.size()
+        if off is not None and size.width() > 0 and size.height() > 0:
+            x = min(max(0.0, x + off.x() / size.width()), 1.0 - w)
+            y = min(max(0.0, y + off.y() / size.height()), 1.0 - h)
         crop = img.copy(int(x * img.width()), int(y * img.height()), max(1, int(w * img.width())),
                         max(1, int(h * img.height())))
         # like ffmpeg's boxblur in the export: shrink a lot, grow back smoothly (twice)
-        k = max(2.0, float(settings()["ocr_box_blur"]) * 1.6)
+        k = max(2.0, box_look(self.view.subs.look, [0, 0, 1, 1])["blur"] * 1.6)
         img = crop
         for _ in range(2):
             small = img.scaled(max(1, int(crop.width() / k)), max(1, int(crop.height() / k)),
@@ -693,16 +855,53 @@ class Preview(QWidget):
 
     def _update_sub(self, t):
         import time
-        text = ""
+        text, look = "", None
         if self.b_cc.isChecked():
             i = cue_at(self.cues, t)
             text = self.cues[i].text if i >= 0 else ""
+            look = self.cues[i].extra.get("look") if i >= 0 else None
         if not text and time.monotonic() < getattr(self, "_sample_until", 0):
-            text = self.SAMPLE
+            text, look = self.SAMPLE, self.sample_look
+        if look != self.view.subs.look:
+            self.view.subs.look = look
+            self.view.subs.update()
         self.view.subs.set_text(text)
-        shown = self.box_mode and (bool(text) or bool(settings()["sub_box_always"]))
-        self.view.subs.set_box(self._region_rect() if shown else None)
-        self.view.region.setVisible(bool(self.region) and self.show_region and not shown)
+        dragging = self.view.dragging() and self.view.grab_box
+        on = bool(look["sub_box"]) if look and "sub_box" in look else self.box_mode     # a line may differ
+        area = (look or {}).get("box_region") or self.box_area
+        self.cur_area = list(area) if area else None
+        shown = on and bool(area) and (bool(text) or bool(settings()["sub_box_always"]) or dragging)
+        self.view.subs.set_box(self._region_rect(self.cur_area) if shown else None)
+        self.view.region.setVisible(bool(self.region) and self.show_region and not self.box_mode)
+
+    def _subs_moved(self, d, box=False):
+        """The lines (or the box) were dragged on the video by d scene pixels."""
+        size = self.view.video.size()
+        if size.width() <= 0 or size.height() <= 0:
+            return
+        dx, dy = d.x() / size.width(), d.y() / size.height()
+        if box and (self.cur_area or self.box_area):
+            x, y, w, h = self.cur_area or self.box_area
+            x = min(max(0.0, x + dx), 1.0 - w)
+            y = min(max(0.0, y + dy), 1.0 - h)
+            moved = [round(x, 4), round(y, 4), w, h]
+            if not self.line_mode:                       # the video's box (a chosen line keeps its own)
+                self.box_area = moved
+            self.cur_area = moved
+            self.box_moved.emit(moved)
+            self._update_sub(self.player.position() / 1000)
+            if self.player.playbackState() != QMediaPlayer.PlayingState:      # a new frame for the blur
+                QTimer.singleShot(0, lambda: self.player.setPosition(self.player.position()))
+        else:
+            s = settings()
+            look = self.view.subs.look if self.line_mode else None      # a chosen line: its place
+            base_x = float((look or {}).get("sub_pos_x", s["sub_pos_x"]))
+            base_m = float((look or {}).get("sub_margin", s["sub_margin"]))
+            x = min(0.95, max(0.05, base_x + dx))
+            margin = min(90.0, max(0.0, base_m - dy * 100))
+            s.update(sub_pos_x=round(x, 4), sub_margin=round(margin, 2))
+            self.view.subs.update()
+            self.style_moved.emit()
 
     def _duration(self, ms):
         self.duration = max(ms / 1000, self.full_duration)
@@ -711,6 +910,7 @@ class Preview(QWidget):
 
     def _state(self, st):
         self.b_play.set_icon("pause" if st == QMediaPlayer.PlayingState else "play")
+        self.view.subs.playing = st == QMediaPlayer.PlayingState
 
     def _error(self, _err, msg):
         self.view.show_message(f"Cannot play this file here:\n{msg}\n(processing still works)")

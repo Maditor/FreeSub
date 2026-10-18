@@ -20,12 +20,21 @@ class Runner(QObject):
     started = Signal(str, list)                 # title, step ids
     finished = Signal(str, str)                 # done | failed | stopped, message
     paused_changed = Signal(bool)
+    release = Signal(str)                       # video: let go of its sound files (blocking: see pipeline)
 
     def __init__(self):
         super().__init__()
+        from ..steps import pipeline
+        pipeline.before_write = self._before_write
         self.control = None
         self.thread = None
         self.watch = None
+
+    def _before_write(self, video):
+        import threading
+        if threading.current_thread() is threading.main_thread():
+            return                              # no window is waiting on this thread (command line)
+        self.release.emit(video)                # BlockingQueuedConnection: back once the window is done
 
     @property
     def busy(self) -> bool:

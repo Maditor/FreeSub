@@ -148,8 +148,8 @@ def to_ass(width: int, height: int, tracks: list[dict]) -> str:
             "Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
             "Alignment, MarginL, MarginR, MarginV, Encoding"]
     events = ["", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
-    for i, tr in enumerate(tracks):
-        name = tr.get("name") or f"S{i}"
+
+    def style_line(name, tr, align):
         bold = -1 if tr.get("bold", True) else 0
         if tr.get("box") is not None:            # opaque box behind each line (BorderStyle 3)
             border, edge = 3, _ass_color("#000000", int(round(255 * (1 - tr["box"]))))
@@ -157,14 +157,33 @@ def to_ass(width: int, height: int, tracks: list[dict]) -> str:
         else:
             border, edge = 1, _ass_color(tr.get("outline_color", "#000000"))
             width, shadow = tr.get("outline", 2), tr.get("shadow", 0.5)
-        head.append(
-            f"Style: {name},{tr.get('font', 'Arial')},{int(tr.get('size', 40))},{_ass_color(tr.get('color', '#ffffff'))},"
-            f"&H000000FF,{edge},&H64000000,{bold},0,0,0,100,100,0,0,{border},"
-            f"{width:.1f},{shadow:.1f},{tr.get('align', 2)},"
-            f"{int(tr.get('margin_l', 20))},{int(tr.get('margin_r', 20))},{int(tr.get('margin_v', 30))},1")
+        return (f"Style: {name},{tr.get('font', 'Arial')},{int(tr.get('size', 40))},"
+                f"{_ass_color(tr.get('color', '#ffffff'))},&H000000FF,{edge},&H64000000,{bold},0,0,0,100,100,0,0,"
+                f"{border},{width:.1f},{shadow:.1f},{align},"
+                f"{int(tr.get('margin_l', 20))},{int(tr.get('margin_r', 20))},{int(tr.get('margin_v', 30))},1")
+
+    for i, tr in enumerate(tracks):
+        name = tr.get("name") or f"S{i}"
+        looks = tr.get("looks") or {}               # lines with a look of their own: a style each
+        look_names = {}
+        for k, lk in looks.items():
+            key = tuple(sorted((a, b) for a, b in lk.items() if a not in ("pos", "an")))
+            if key not in look_names:
+                look_names[key] = f"{name}L{len(look_names) + 1}"
+                head.append(style_line(look_names[key], dict(tr, **{a: b for a, b in lk.items()
+                                                                     if a not in ("pos", "an")}),
+                                       tr.get("align", 2)))
+        head.append(style_line(name, tr, tr.get("align", 2)))
         pos = tr.get("pos")
         tag = f"{{\\an{tr.get('align', 5)}\\pos({pos[0]:.0f},{pos[1]:.0f})}}" if pos else ""
-        for c in tr["cues"]:
-            if c.text.strip():
-                events.append(f"Dialogue: {i},{_ass_time(c.start)},{_ass_time(c.end)},{name},,0,0,0,,{tag}{_ass_text(c.text)}")
+        for k, c in enumerate(tr["cues"]):
+            if not c.text.strip():
+                continue
+            style, t = name, tag
+            lk = looks.get(k)
+            if lk:
+                style = look_names[tuple(sorted((a, b) for a, b in lk.items() if a not in ("pos", "an")))]
+                if lk.get("pos"):
+                    t = f"{{\\an{lk.get('an', 2)}\\pos({lk['pos'][0]:.0f},{lk['pos'][1]:.0f})}}"
+            events.append(f"Dialogue: {i},{_ass_time(c.start)},{_ass_time(c.end)},{style},,0,0,0,,{t}{_ass_text(c.text)}")
     return "\n".join(head + events) + "\n"

@@ -65,6 +65,16 @@ PATHS = {
     "import": f'<path {S} d="M12 4v11M7.5 10.5L12 15l4.5-4.5M4 14v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/>',
     "folder_open": f'<path {S} d="M3.5 18.5V6.5A1.5 1.5 0 0 1 5 5h4l2 2h7a1.5 1.5 0 0 1 1.5 1.5V10M3.5 18.5l2.6-7.2a1.5 1.5 0 0 1 1.4-1h12.9a1 1 0 0 1 .9 1.3l-2.3 6.5a1.5 1.5 0 0 1-1.4 1z"/>',
     "film": f'<rect {S} x="3.5" y="4.5" width="17" height="15" rx="2"/><path {S} d="M7.5 4.5v15M16.5 4.5v15M3.5 9h4M3.5 15h4M16.5 9h4M16.5 15h4"/>',
+    "edit": f'<path {S} d="M4.5 19.5l1-4.2L15.8 5a2 2 0 0 1 2.8 0l.4.4a2 2 0 0 1 0 2.8L8.7 18.5z"/><path {S} d="M14 6.8l3.2 3.2"/>',
+    "link": f'<path {S} d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1.2 1.2"/><path {S} d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1.2-1.2"/>',
+    "timeline": f'<rect {S} x="3.5" y="4.5" width="17" height="6" rx="1.5"/><rect {S} x="3.5" y="13.5" width="10" height="6" rx="1.5"/><path {S} d="M17 12v8"/>',
+    "split": f'<path {S} d="M12 3v18M7 7.5H4.5v9H7M17 7.5h2.5v9H17"/>',
+    "undo": f'<path {S} d="M9 7.5L4.5 12 9 16.5"/><path {S} d="M4.5 12H15a4.5 4.5 0 0 1 0 9h-2"/>',
+    "redo_arrow": f'<path {S} d="M15 7.5l4.5 4.5-4.5 4.5"/><path {S} d="M19.5 12H9a4.5 4.5 0 0 0 0 9h2"/>',
+    "lock": f'<rect {S} x="5.5" y="10.5" width="13" height="9.5" rx="2"/><path {S} d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>',
+    "unlock": f'<rect {S} x="5.5" y="10.5" width="13" height="9.5" rx="2"/><path {S} d="M8.5 10.5V8a3.5 3.5 0 0 1 6.8-1.2"/>',
+    "trim_left": f'<path {S} d="M14 4v16"/><path {S} d="M10 8l-4 4 4 4M6 12h5"/><path {S} d="M17.5 7.5H20v9h-2.5"/>',
+    "trim_right": f'<path {S} d="M10 4v16"/><path {S} d="M14 8l4 4-4 4M18 12h-5"/><path {S} d="M6.5 7.5H4v9h2.5"/>',
     "key": f'<circle {S} cx="8" cy="15" r="4"/><path {S} d="M11 12l8.5-8.5M16 7l2.5 2.5M14 9l2 2"/>',
 }
 

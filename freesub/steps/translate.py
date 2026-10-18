@@ -5,6 +5,7 @@ blocks of lines with the lines before / after, the film context and the glossary
 (quota, key, network) the next one is used; lines an AI left out are filled in by Google.
 A checkpoint (translate.partial.json) lets a stopped run go on.
 """
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from ..core.subtitle import Cue, load_srt, save_srt
 from ..log import step_timer
 from ..translate import ai, google
 from ..translate import prompt as P
+from ..translate import names, styles
 from .transcribe import wrap
 
 log = logging.getLogger(__name__)
@@ -58,8 +60,10 @@ def run(project: Project, control, force=False) -> str:
         log.info("Subtitles are already in %s: copying them", target)
     cues = load_srt(project.src_srt)
     texts = [_flat(c.text) for c in cues]
-    params = {"target": target, "first": s["translator"], "n": len(cues),
-              "context": s["translate_context"][:200], "glossary": s["translate_glossary"][:200]}
+    style = styles.get(s["translate_style"])
+    params = {"target": target, "first": s["translator"], "n": len(cues), "style": style["id"],
+              "style_text": hashlib.sha1(style["text"].encode("utf-8")).hexdigest()[:10],
+              "glossary": names.glossary()[:200]}
     if not force and project.has(TR_SRT) and project.meta.get("tr_edited"):
         project.ensure_published(TR_SRT, target)
         control.progress(1.0, "Keeping your edited translation")
@@ -118,7 +122,12 @@ def run(project: Project, control, force=False) -> str:
 
 def _translate(project, control, cues, texts, out, src, target, save_partial):
     s = settings()
-    pairs = P.glossary_pairs(s["translate_glossary"])
+    style = styles.get(s["translate_style"])["text"]
+    gloss = names.glossary()                    # the chosen name list (Steps → Subtitles)
+    pairs = P.glossary_pairs(gloss)
+    if target == "vi":                          # the shipped guides are for Vietnamese: their fixed terms too
+        mine = {a for a, _b in pairs}
+        pairs = sorted(pairs + [p for p in styles.term_pairs(style) if p[0] not in mine], key=lambda p: -len(p[0]))
     genders = _genders(project, cues)
     services = order()
     used = []
@@ -142,8 +151,8 @@ def _translate(project, control, cues, texts, out, src, target, save_partial):
                 else:
                     before = [(texts[k], out[k]) for k in range(max(0, i - CONTEXT_BEFORE), i) if out[k]]
                     after = texts[idx[-1] + 1: idx[-1] + 1 + CONTEXT_AFTER]
-                    got = _ai(svc, block, src, target, before, after, s["translate_context"],
-                              s["translate_glossary"], [genders[k] for k in idx], control)
+                    got = _ai(svc, block, src, target, before, after, style,
+                              gloss, [genders[k] for k in idx], control)
             except Cancelled:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -172,9 +181,9 @@ def _google(lines, src, target, pairs):
     return google.translate(lines, src if src != "auto" else "auto", target)
 
 
-def _ai(svc, block, src, target, before, after, context, glossary, genders, control):
+def _ai(svc, block, src, target, before, after, style, glossary, genders, control):
     client = ai.SERVICES[svc]
-    text = P.build(block, src, target, before, after, context, glossary, genders)
+    text = P.build(block, src, target, before, after, "", glossary, genders, style=style)
     got = P.parse(client.chat(text, control=control), len(block))
     missing = [k for k, t in enumerate(got) if not t]
     if missing:

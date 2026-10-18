@@ -2,18 +2,22 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QGuiApplication, QPalette
 
-# Fluent 2 / Windows 11 colours: neutral layers, one blue accent, thin strokes.
+# Layers from back to front, each a step apart so areas and controls can be told apart at a glance:
+#   bg (window) < panel (columns) < raised (cards) ; fields sit IN a card (a shade darker: "inset"),
+#   buttons stand OUT of it (a shade lighter, a darker bottom edge). One blue accent.
 DARK = dict(
-    bg="#202020", panel="#272727", raised="#2d2d2d", field="#2d2d2d", hover="#353535", border="#3a3a3a",
-    stroke_strong="#4a4a4a", fg="#ffffff", muted="#c5c5c5", faint="#8a8a8a", accent="#60cdff",
+    bg="#161616", panel="#202020", raised="#2a2a2a", field="#1b1b1b", hover="#383838", border="#3a3a3a",
+    stroke_strong="#4f4f4f", fg="#ffffff", muted="#c5c5c5", faint="#8a8a8a", accent="#60cdff",
     accent_hover="#5ab9e6", accent_fg="#000000", ok="#6ccb5f", warn="#fce100", err="#ff99a4", video="#000000",
-    select="rgba(96, 205, 255, 0.16)", pressed="#2a2a2a",
+    select="rgba(96, 205, 255, 0.16)", pressed="#2e2e2e", button="#363636", button_hover="#414141",
+    card_edge="#111111",
 )
 LIGHT = dict(
-    bg="#f3f3f3", panel="#fbfbfb", raised="#ffffff", field="#ffffff", hover="#ececec", border="#e0e0e0",
-    stroke_strong="#c8c8c8", fg="#1b1b1b", muted="#5c5c5c", faint="#8a8a8a", accent="#005fb8",
+    bg="#e3e6ea", panel="#f1f3f6", raised="#ffffff", field="#f1f3f5", hover="#e6e9ed", border="#d7dbe0",
+    stroke_strong="#b9bfc7", fg="#1b1b1b", muted="#5c5c5c", faint="#8a8a8a", accent="#005fb8",
     accent_hover="#1a6fc0", accent_fg="#ffffff", ok="#0f7b0f", warn="#9d5d00", err="#c42b1c", video="#1b1b1b",
-    select="rgba(0, 95, 184, 0.10)", pressed="#e4e4e4",
+    select="rgba(0, 95, 184, 0.10)", pressed="#dfe3e8", button="#ffffff", button_hover="#f2f4f7",
+    card_edge="#c9ced5",
 )
 
 _current = {"name": "dark", "c": DARK}
@@ -119,9 +123,9 @@ QToolTip {{ background: {c['raised']}; color: {c['fg']}; border: 1px solid {c['b
 #PaneTitle {{ font-size: 13px; font-weight: 600; padding: 2px 0; }}
 #Soon {{ color: {c['muted']}; font-size: 13px; }}
 
-QPushButton {{ background: {c['raised']}; border: 1px solid {c['border']}; border-bottom-color: {c['stroke_strong']};
+QPushButton {{ background: {c['button']}; border: 1px solid {c['border']}; border-bottom-color: {c['stroke_strong']};
     border-radius: 4px; padding: 5px 12px; min-height: 20px; }}
-QPushButton:hover {{ background: {c['hover']}; }}
+QPushButton:hover {{ background: {c['button_hover']}; }}
 QPushButton:pressed {{ background: {c['pressed']}; color: {c['muted']}; border-bottom-color: {c['border']}; }}
 QPushButton:disabled {{ color: {c['faint']}; background: {c['panel']}; border-color: {c['border']}; }}
 QPushButton[primary="true"] {{ background: {c['accent']}; color: {c['accent_fg']}; border: 1px solid {c['accent']};
@@ -139,6 +143,11 @@ QToolButton:disabled {{ color: {c['faint']}; }}
 #CommandBar QToolButton[primary="true"]:hover {{ background: {c['accent_hover']}; }}
 #CommandBar QToolButton[primary="true"]:disabled {{ background: {c['hover']}; color: {c['faint']}; }}
 #BarSep {{ background: {c['border']}; }}
+QToolButton#SpeedButton {{ padding: 2px 9px; border: 1px solid {c['border']}; border-radius: 10px; font-weight: 600;
+    min-width: 30px; color: {c['fg']}; }}
+QToolButton#SpeedButton:hover {{ background: {c['hover']}; }}
+QToolButton#SpeedButton[changed="true"] {{ color: {c['accent']}; border-color: {c['accent']}; }}
+QToolButton#SpeedButton::menu-indicator {{ image: none; width: 0; }}
 QFrame#HLine {{ background: {c['border']}; border: none; }}
 QToolButton#WinButton, QToolButton#WinClose {{ border-radius: 0; background: transparent; padding: 0; }}
 QToolButton#WinButton:hover {{ background: {c['hover']}; }}
@@ -217,10 +226,11 @@ QMenu {{ background: {c['raised']}; border: 1px solid {c['border']}; border-radi
 QMenu::item {{ padding: 6px 20px 6px 12px; border-radius: 4px; }}
 QMenu::item:selected {{ background: {c['hover']}; }}
 QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 6px; }}
-#Card {{ background: {c['raised']}; border: 1px solid {c['border']}; border-radius: 6px; }}
+#Card {{ background: {c['raised']}; border: 1px solid {c['border']}; border-bottom-color: {c['card_edge']};
+    border-radius: 8px; }}
 #CardTitle {{ font-size: 13px; font-weight: 600; }}
 #CardTitle:disabled {{ color: {c['faint']}; }}
-QPushButton#SegFirst, QPushButton#SegMid, QPushButton#SegLast {{ background: {c['raised']}; border: 1px solid {c['border']};
+QPushButton#SegFirst, QPushButton#SegMid, QPushButton#SegLast {{ background: {c['button']}; border: 1px solid {c['border']};
     padding: 5px 10px; border-radius: 0; font-weight: 400; }}
 QPushButton#SegFirst {{ border-top-left-radius: 4px; border-bottom-left-radius: 4px; }}
 QPushButton#SegLast {{ border-top-right-radius: 4px; border-bottom-right-radius: 4px; border-left: none; }}
