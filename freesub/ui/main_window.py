@@ -1490,6 +1490,8 @@ class MainWindow(QMainWindow):
         sc("Ctrl+I", self.queue.add_files)                               # import media
         sc("Ctrl+O", self.queue.add_files)
         sc("Ctrl+E", lambda: self.start("export"))
+        sc("Ctrl+F", self.editor.open_find)                              # find and replace in the subtitles
+        sc("Ctrl+H", self.editor.open_find)
         # timeline
         sc("Ctrl+B", tl.split, timeline=True)
         sc(Qt.Key_Q, lambda: tl.delete_side("left"), timeline=True)

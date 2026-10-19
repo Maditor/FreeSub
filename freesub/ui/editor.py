@@ -12,10 +12,12 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem, QVBoxLayout,
                                QWidget)
 
+from ..core import find as fnd
 from ..core.project import SRC_SRT, TR_SRT, Project
 from ..core.subtitle import Cue, cue_at, fmt_clock, load_srt, parse_time, save_srt
+from .find_bar import FindBar, FindDelegate
 from .queue import open_folder
-from .widgets import IconButton, label, row, section, wait_cursor
+from .widgets import IconButton, confirm, label, row, section, wait_cursor
 
 log = logging.getLogger(__name__)
 COLS = ["Start", "End", "Voice", "Original", "Translation"]
@@ -86,6 +88,13 @@ class Editor(QWidget):
                                          "Translate). Your edits of this video's lines are replaced")
         self.b_fit = IconButton("wrap", "Fit the lines to the box: break every line again so it fits the box "
                                         "drawn on the video (or the video width), with the font and size of Style")
+        self.b_find = IconButton("search", "Find and replace in the subtitles (Ctrl+F)", checkable=True)
+        self.find = FindBar()
+        self.find.hide()
+        self._find_hits, self._find_at = [], -1           # the matches (core/find.py) and the current one
+        self._find_delegate = FindDelegate(self.table)
+        self.table.setItemDelegateForColumn(C_SRC, self._find_delegate)
+        self.table.setItemDelegateForColumn(C_TR, self._find_delegate)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
@@ -95,8 +104,9 @@ class Editor(QWidget):
         self.b_voice.toggled.connect(self._voice_toggled)
         self.voice_times = None      # {row: (start, end)} when the narration read the lines (None: no narration)
         self._voice_tip()
-        lay.addWidget(row(section("Subtitles"), self.count, None, self.b_fit, self.b_voice, self.b_redo,
-                          self.b_import, self.b_open))
+        lay.addWidget(row(section("Subtitles"), self.count, None, self.b_find, self.b_fit, self.b_voice,
+                          self.b_redo, self.b_import, self.b_open))
+        lay.addWidget(self.find)
         self.b_redo.clicked.connect(self.redo_requested.emit)
         self.b_import.clicked.connect(self._import_menu)
         lay.addWidget(self.table, 1)
@@ -108,6 +118,14 @@ class Editor(QWidget):
         self.table.itemChanged.connect(self._edited)
         self.b_open.clicked.connect(self.open_output)
         self.b_fit.clicked.connect(self.fit_lines)
+        self.b_find.toggled.connect(self.show_find)
+        self.find.changed.connect(self._find_changed)
+        self.find.step.connect(self._find_step)
+        self.find.replace_one.connect(self._replace_one)
+        self.find.replace_all.connect(self._replace_all)
+        self.find.closed.connect(lambda: self.b_find.setChecked(False))
+        self.find.undo_asked.connect(self.undo)
+        self.find.redo_asked.connect(self.redo)
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(700)
@@ -253,6 +271,11 @@ class Editor(QWidget):
         self.b_import.setEnabled(self.project is not None)
         self.b_redo.setEnabled(self.project is not None)
         self.b_fit.setEnabled(n > 0)
+        self.b_find.setEnabled(n > 0)
+        if n == 0 and self.b_find.isChecked():
+            self.b_find.setChecked(False)
+        self.find.set_has_translation(bool(self.tr))
+        self._find_refresh()                              # the matches follow the lines (undo, a new video...)
 
     def shown_cues(self, prefer="translation"):
         """Cues for the preview: the translation where there is one, else the original; with the narration's
@@ -451,6 +474,153 @@ class Editor(QWidget):
             return
         self._save_timer.start()
         self.cues_changed.emit()
+        self._find_refresh()
+
+    # ------------------------------------------------------------ find and replace
+    def open_find(self) -> bool:
+        """Ctrl+F / Ctrl+H: show the find and replace bar, or jump into its box when it is already there."""
+        if not self.src or not self.isVisible():
+            return False
+        if self.b_find.isChecked():
+            self.find.focus_find()
+        else:
+            self.b_find.setChecked(True)                  # -> show_find(True)
+        return True
+
+    def show_find(self, on: bool):
+        self.find.setVisible(on)
+        if on:
+            self.find.set_has_translation(bool(self.tr))
+            self.find.focus_find()
+            self._find_refresh(anchor=self._find_row_anchor())
+        else:
+            self._find_hits, self._find_at = [], -1
+            self._find_delegate.marks = {}
+            self.table.viewport().update()
+
+    def _find_row_anchor(self):
+        return (max(0, self.table.currentRow()), 0, 0, 0)
+
+    def _find_refresh(self, anchor=None, scroll=False):
+        """Look for the text again in the lines as they are now. The current match stays where it was (or is
+        the first one from `anchor` on)."""
+        if not self.find.isVisible():
+            return
+        case, whole, start = self.find.options_on()
+        old = self._find_hits[self._find_at].key() if 0 <= self._find_at < len(self._find_hits) else None
+        self._find_hits = fnd.find_all([c.text for c in self.src], [c.text for c in self.tr], self.find.needle(),
+                                       self.find.kinds(), case, whole, start)
+        at = -1
+        if self._find_hits:
+            key = anchor or old or (0, 0, 0, 0)
+            at = next((i for i, m in enumerate(self._find_hits) if m.key() >= key), 0)
+        self._find_at = at
+        self._find_paint()
+        if scroll and at >= 0:
+            self._find_show(at, seek=False)
+
+    def _find_paint(self):
+        marks = {}
+        for i, m in enumerate(self._find_hits):
+            col = C_SRC if m.kind == fnd.SRC else C_TR
+            text = (self.src if m.kind == fnd.SRC else self.tr)[m.row].text
+            off = sum(len(l) + 3 for l in text.split("\n")[:m.line])      # the table shows " / " for a line break
+            marks.setdefault((m.row, col), []).append((off + m.start, off + m.end, i == self._find_at))
+        self._find_delegate.marks = marks
+        self.table.viewport().update()
+        self.find.set_count(self._find_at, len(self._find_hits))
+
+    def _find_show(self, i: int, seek: bool = True):
+        m = self._find_hits[i]
+        col = C_SRC if m.kind == fnd.SRC else C_TR
+        self.table.blockSignals(True)
+        self.table.setCurrentCell(m.row, col)
+        self.table.blockSignals(False)
+        it = self.table.item(m.row, col)
+        if it is not None:
+            self.table.scrollToItem(it, QAbstractItemView.PositionAtCenter)
+        if seek:
+            self.seek.emit(self._time(m.row)[0] + 0.01)
+
+    def _find_changed(self):
+        self._find_refresh(anchor=self._find_row_anchor(), scroll=True)
+
+    def _find_step(self, d: int):
+        n = len(self._find_hits)
+        if not n:
+            return
+        self._find_at = (self._find_at + d) % n if self._find_at >= 0 else 0
+        self._find_paint()
+        self._find_show(self._find_at)
+
+    def _find_busy(self) -> bool:
+        if getattr(self, "_fit_job", None):
+            self.find.flash(tr("Wait: the lines are being fitted"))
+            return True
+        return False
+
+    def _find_put(self, row: int, kind: str, text: str):
+        (self.src if kind == fnd.SRC else self.tr)[row].text = text
+        it = self.table.item(row, C_SRC if kind == fnd.SRC else C_TR)
+        if it is not None:
+            self.table.blockSignals(True)
+            it.setText(text.replace("\n", " / "))
+            self.table.blockSignals(False)
+
+    def _find_touched(self, kinds):
+        self._hl = None
+        self._dirty.update(kinds)
+        self._save_timer.start()
+        self.cues_changed.emit()
+
+    @staticmethod
+    def _short(text: str, n: int = 60) -> str:
+        text = " ".join(text.split())
+        return text if len(text) <= n else text[:n - 1] + "…"
+
+    def _replace_one(self):
+        if self._find_busy() or not 0 <= self._find_at < len(self._find_hits):
+            return
+        m = self._find_hits[self._find_at]
+        repl = self.find.replacement()
+        found = (self.src if m.kind == fnd.SRC else self.tr)[m.row].text.split("\n")[m.line][m.start:m.end]
+        ask = (tr("Replace “{a}” with “{b}”?\n(Ctrl+Z brings it back.)").replace("{b}", self._short(repl))
+               if repl else tr("Delete “{a}”?\n(Ctrl+Z brings it back.)"))
+        if not confirm(self, ask.replace("{a}", self._short(found)), "find_replace_one", "Replace"):
+            return
+        self._remember("find and replace")
+        cue = (self.src if m.kind == fnd.SRC else self.tr)[m.row]
+        lines = cue.text.count("\n") + 1
+        new = fnd.replace_in_text(cue.text, [(m.line, m.start, m.end)], repl)
+        self._find_put(m.row, m.kind, new)
+        self._find_touched({m.kind})
+        dropped = new.count("\n") + 1 < lines            # a line became empty and went away
+        self._find_refresh(anchor=(m.row, 0 if m.kind == fnd.SRC else 1, m.line, 0 if dropped else m.start + len(repl)))
+        if self._find_at >= 0:
+            self._find_show(self._find_at)
+
+    def _replace_all(self):
+        if self._find_busy() or not self._find_hits:
+            return
+        repl = self.find.replacement()
+        by = {}
+        for m in self._find_hits:
+            by.setdefault((m.row, m.kind), []).append((m.line, m.start, m.end))
+        n = len(self._find_hits)
+        needle = self.find.needle()
+        ask = (tr("Replace {a} matches of “{b}” with “{c}”?\n(Ctrl+Z brings them back.)").replace("{c}", self._short(repl))
+               if repl else tr("Delete {a} matches of “{b}”?\n(Ctrl+Z brings them back.)"))
+        if not confirm(self, ask.replace("{a}", str(n)).replace("{b}", self._short(needle)), "find_replace_all",
+                       "Replace all", danger=True):          # No is the default here: a slip of the finger is safe
+            return
+        self._remember("find and replace")                # one Ctrl+Z brings all of it back
+        with wait_cursor():
+            for (row, kind), spans in by.items():
+                cue = (self.src if kind == fnd.SRC else self.tr)[row]
+                self._find_put(row, kind, fnd.replace_in_text(cue.text, spans, repl))
+        self._find_touched({kind for _row, kind in by})
+        self._find_refresh(anchor=(0, 0, 0, 0))
+        self.find.flash(tr("{a} replaced").replace("{a}", str(n)))
 
     def forget(self, video: str):
         """This video's project is being deleted: drop unsaved edits (they must not write it back) and let go."""

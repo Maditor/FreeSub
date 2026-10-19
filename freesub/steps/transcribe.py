@@ -191,7 +191,9 @@ def tidy_timing(cues):
 # ------------------------------------------------------------------ the step
 def _segments_to_cues(seg, lang, offset, drop_interjections):
     """One Whisper segment -> zero or more cues (dicts, JSON-safe)."""
-    text = seg.text.strip()
+    text = hal.strip_gender_tags(seg.text.strip())
+    if not text:
+        return []
     if settings()["whisper_filter"] and not hal.keep_segment(text, seg.avg_logprob, seg.no_speech_prob,
                                                              seg.compression_ratio, lang, drop_interjections):
         log.info("Dropped (filter) %.1f: %s", seg.start + offset, text[:80])
@@ -202,7 +204,7 @@ def _segments_to_cues(seg, lang, offset, drop_interjections):
         return [{"s": seg.start + offset, "e": seg.end + offset, "t": rep or text, "lp": seg.avg_logprob}]
     out = []
     for chunk in split_words(words, lang):
-        t = _join(chunk)
+        t = hal.strip_gender_tags(_join(chunk))
         if hal.norm(t):
             out.append({"s": chunk[0]["s"], "e": chunk[-1]["e"], "t": t, "lp": seg.avg_logprob,
                         "w": [[round(w["s"], 3), round(w["e"], 3), w["w"]] for w in chunk]})
@@ -300,7 +302,9 @@ def _finish(project, control, state, lang_opt, params, want_spk, wav) -> str:
         pass
     if want_spk:
         raw = _split_speakers(raw, wav, control)
-    cues = [Cue(c["s"], c["e"], c["t"], {"lp": c.get("lp"), "spk": c.get("spk")}) for c in raw]
+    cues = [Cue(c["s"], c["e"], hal.strip_gender_tags(c["t"]), {"lp": c.get("lp"), "spk": c.get("spk")})
+            for c in raw]
+    cues = [c for c in cues if hal.norm(c.text)]       # a line that was only a (nam)/(nữ) label is gone
     cues = hal.drop_loops(cues)
     cues = tidy_timing(cues)
     for c in cues:

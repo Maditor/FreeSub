@@ -18,12 +18,26 @@ from ..log import step_timer
 from ..translate import ai, google
 from ..translate import prompt as P
 from ..translate import names, styles
+from .hallucination import norm
 from .transcribe import wrap
 
 log = logging.getLogger(__name__)
 PARTIAL = "translate.partial.json"
 CONTEXT_BEFORE = 6
 CONTEXT_AFTER = 3
+SENT_END = tuple("。．.!！?？…")
+
+
+def _block_end(cues, texts, i, n, batch):
+    """End of the block that starts at i: at most `batch` lines, and when possible cut where a sentence ends
+    (closing punctuation or a pause of 1 s or more) so a sentence is not torn between two requests."""
+    end = min(n, i + batch)
+    if end >= n:
+        return n
+    for e in range(end, i + max(1, batch // 2), -1):
+        if texts[e - 1].rstrip().endswith(SENT_END) or cues[e].start - cues[e - 1].end >= 1.0:
+            return e
+    return end
 
 
 def order() -> list[str]:
@@ -136,10 +150,11 @@ def _translate(project, control, cues, texts, out, src, target, save_partial):
     i = 0
     while i < n:
         control.check()
-        if all(out[i:i + batch]):
-            i += batch
+        j = _block_end(cues, texts, i, n, batch)
+        if all(out[i:j]):
+            i = j
             continue
-        idx = list(range(i, min(n, i + batch)))
+        idx = list(range(i, j))
         block = [texts[k] for k in idx]
         got = None
         while services and got is None:
@@ -166,7 +181,7 @@ def _translate(project, control, cues, texts, out, src, target, save_partial):
         for k, t in zip(idx, got):
             out[k] = t
         save_partial()
-        i += batch
+        i = j
     project.meta["_used_services"] = used
 
 
@@ -181,17 +196,49 @@ def _google(lines, src, target, pairs):
     return google.translate(lines, src if src != "auto" else "auto", target)
 
 
+def _ask(client, text, block, control):
+    got = P.parse(client.chat(text, control=control), len(block))
+    return [P.clean(t, src) for t, src in zip(got, block)]
+
+
+def _repeats(block, got, prev=("", "")):
+    """Lines whose translation just repeats the line before (the sources differ): a sign the AI copied
+    instead of translating."""
+    bad = []
+    for k, t in enumerate(got):
+        s0, t0 = (block[k - 1], got[k - 1]) if k else prev
+        n, n0 = norm(t), norm(t0)
+        if not n or not n0 or norm(block[k]) == norm(s0):
+            continue
+        if n == n0 or (len(n) >= 12 and n in n0) or (len(n0) >= 12 and n0 in n):
+            bad.append(k)
+    return bad
+
+
 def _ai(svc, block, src, target, before, after, style, glossary, genders, control):
     client = ai.SERVICES[svc]
     text = P.build(block, src, target, before, after, "", glossary, genders, style=style)
-    got = P.parse(client.chat(text, control=control), len(block))
+    got = _ask(client, text, block, control)
     missing = [k for k, t in enumerate(got) if not t]
     if missing:
         log.warning("%s left out %d line(s), asking again", client.name, len(missing))
-        again = P.parse(client.chat(text + "\n\nYour previous answer left out some lines. Output ALL "
-                                    f"{len(block)} numbered lines.", control=control), len(block))
+        again = _ask(client, text + "\n\nYour previous answer left out some lines. Output ALL "
+                     f"{len(block)} numbered lines. Each line must be the translation of its own input line, "
+                     "never a copy of a neighbouring line.", block, control)
         got = [g or a for g, a in zip(got, again)]
-        missing = [k for k, t in enumerate(got) if not t]
+    prev = before[-1] if before else ("", "")
+    dups = _repeats(block, got, prev)
+    if dups:
+        log.warning("%s repeated %d line(s), asking again for those", client.name, len(dups))
+        lines = [block[k] for k in dups]
+        fix = P.build(lines, src, target, (), (), "", glossary, [genders[k] for k in dups], style=style)
+        fixed = _ask(client, fix + "\n\nThese lines come from different places in the video. Translate each "
+                     "one by itself; never copy the translation of another line.", lines, control)
+        for k, t in zip(dups, fixed):
+            got[k] = t
+        for k in _repeats(block, got, prev):     # still a copy: leave it empty, Google fills it in below
+            got[k] = ""
+    missing = [k for k, t in enumerate(got) if not t]
     if missing:                                  # still missing: Google fills them in
         filled = google.translate([block[k] for k in missing], src, target)
         for k, t in zip(missing, filled):

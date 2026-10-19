@@ -53,6 +53,7 @@ PATHS = {
     "square": f'<rect {F} x="7.5" y="7.5" width="9" height="9" rx="1.5"/>',
     "ring": f'<circle {S} cx="12" cy="12" r="4.5"/>',
     "chevron_right": f'<path {S} d="M9.5 6l6 6-6 6"/>',
+    "chevron_up": f'<path {S} d="M6 14.5l6-6 6 6"/>',
     "chevron_down": f'<path {S} d="M6 9.5l6 6 6-6"/>',
     "folder": f'<path {S} d="M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4l2 2h8a1.5 1.5 0 0 1 1.5 1.5v8.5A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z"/>',
     "add": f'<path {S} d="M12 5v14M5 12h14"/>',

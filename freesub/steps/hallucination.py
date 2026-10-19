@@ -80,6 +80,25 @@ for _f in FILTERS.values():
     _f["interjection"] = re.compile(_f["interjection"], re.I)
 
 
+# Gender / voice labels Whisper sometimes writes at the start of a line, e.g. "(nam) ...", "(Nữ): ...",
+# "(男性)", "[Female]", "(male voice)". They describe the voice, they are not speech, so they are removed.
+_TAG_WORDS = (r"(?:giọng\s+)?(?:nam|nữ)(?:\s+giới)?|đàn\s+ông|phụ\s+nữ|"
+              r"(?:male|female|man|woman|boy|girl)(?:\s+(?:voice|speaker))?|"
+              r"男性?|女性?|男の人|女の人|男声|女声|男声音|女声音|"
+              r"남자|여자|남성|여성|"
+              r"мужчина|женщина|мужской\s+голос|женский\s+голос")
+_LEAD_TAG = re.compile(
+    r"(^|\n)[ \t]*(?:[\(\[（【「『][ \t]*(?:" + _TAG_WORDS + r")[ \t]*[\)\]）】」』][ \t]*[:：]?[ \t]*)+",
+    re.I)
+
+
+def strip_gender_tags(text: str) -> str:
+    """'(nam) Xin chào' -> 'Xin chào'. Only labels at the start of a line are removed."""
+    if not text:
+        return text
+    return _LEAD_TAG.sub(r"\1", text).strip()
+
+
 def filters(lang: str) -> dict:
     return FILTERS.get(lang, FILTERS["ja"] if lang in ("ja", "zh", "ko") else FILTERS["en"])
 
@@ -98,7 +117,7 @@ def collapse_repeats(text: str, lang: str = "ja"):
 def keep_segment(text, avg_logprob, no_speech_prob, compression_ratio, lang="ja",
                  drop_interjections=True) -> bool:
     """Decide whether a transcribed segment is real speech."""
-    t = (text or "").strip()
+    t = strip_gender_tags((text or "").strip())
     n = norm(t)
     if not n:
         return False

@@ -262,6 +262,11 @@ QMenu::item:selected {{ background: {c['hover']}; }}
 QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 6px; }}
 #Card {{ background: {c['raised']}; border: 1px solid {c['border']}; border-bottom-color: {c['card_edge']};
     border-radius: 8px; }}
+#FindBar {{ background: {c['raised']}; border: 1px solid {c['border']}; border-bottom-color: {c['card_edge']};
+    border-radius: 8px; }}
+QToolButton#FindDrop {{ background: {c['field']}; border: 1px solid {c['border']}; border-radius: 4px; padding: 3px 22px 3px 10px; }}
+QToolButton#FindDrop:hover {{ background: {c['hover']}; }}
+QToolButton#FindDrop::menu-indicator {{ subcontrol-origin: padding; subcontrol-position: center right; right: 6px; }}
 #CardTitle {{ font-size: 13px; font-weight: 600; }}
 #CardTitle:disabled {{ color: {c['faint']}; }}
 QPushButton#SegFirst, QPushButton#SegMid, QPushButton#SegLast {{ background: {c['button']}; border: 1px solid {c['border']};
