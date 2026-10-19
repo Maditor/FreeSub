@@ -1,8 +1,8 @@
 # FreeSub - Đang phát triển, chưa ổn định
-## Mình không phải người chuyên làm những video như này để đăng youtube, nên việc test và phát triển sẽ thiếu sót nhiều thứ, mọi người sử dụng có thể góp ý mình sẽ cố gắng tối ưu lại nha!
+### Mình không phải người chuyên làm những video như này để đăng youtube, nên việc test và phát triển sẽ thiếu sót nhiều thứ, mọi người sử dụng có thể góp ý mình sẽ cố gắng tối ưu lại nha!
 
-## Tool được viết hoàn toàn bằng AI và đăng source miễn phí, mình không chịu trách nhiệm nếu bạn mua từ bên thứ 3!
-## (hết Token, thứ 5 cập nhật tiếp)
+### Tool được viết hoàn toàn bằng AI và đăng source miễn phí, mình không chịu trách nhiệm nếu bạn mua từ bên thứ 3!
+### (hết Token, thứ 5 cập nhật tiếp)
 
 Tạo phụ đề, dịch và thuyết minh cho video. Miễn phí, mã nguồn mở (MIT), chạy trên Windows 10/11 64-bit.
 
