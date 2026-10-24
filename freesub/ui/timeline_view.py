@@ -10,6 +10,7 @@ Videos are dragged here from the list on the left. S (or Ctrl+B) cuts the clip i
 Delete removes the selected clip, Ctrl+Z / Ctrl+Y undo / redo the clip changes, Ctrl + wheel zooms.
 """
 import os
+import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QPixmap
@@ -43,6 +44,12 @@ class _Video:
         self.text_of = {}
         self.spans = []
         self.thumb = None
+        self.frames = {}                # film strip: {index: QPixmap}, index i = the moment i * step (as made)
+        self.step = 0.0
+        self._have = []                 # the indexes in frames, sorted
+        self._loaded = {}               # index -> the file shown (an exact picture replaces a rough one)
+        self._strip_done = False
+        self._strip_thread = None
         self.looks = {}
         self._making = False
 
@@ -70,8 +77,10 @@ class _Video:
         self.looks = line_looks(p)
 
     def _picture(self, p):
-        """The video's picture: read it once it is there; when it is not, have it made (once, in the background).
-        Checked on every refresh, so a picture made later (or made again) shows up."""
+        """The video's pictures: the small pictures along it (a film strip, like video editors show) and, until
+        they are made, its one picture repeated. Each is made once, in the background; checked on every refresh,
+        so pictures made later show up."""
+        self._film(p)
         if self.thumb is not None:
             return
         if p.has("thumb.jpg"):
@@ -89,6 +98,60 @@ class _Video:
                 except Exception:  # noqa: BLE001
                     pass
             threading.Thread(target=make, daemon=True).start()
+
+    def _film(self, p):
+        """Read the pictures made so far (they are made in the background and show up as they come)."""
+        if self._strip_done:
+            return
+        th = self._strip_thread
+        if th is None and os.path.isfile(self.path):
+            import threading
+
+            def make():
+                try:
+                    Project(self.path).make_strip()
+                except Exception:  # noqa: BLE001
+                    pass
+            th = self._strip_thread = threading.Thread(target=make, daemon=True)
+            th.start()
+        st = p.strip_state()
+        if not st:
+            if th is not None and not th.is_alive():
+                self._strip_done = True                      # could not be made: the one picture stays
+            return
+        if abs(st["step"] - self.step) > 1e-9:
+            self.frames, self._loaded, self.step = {}, {}, st["step"]
+        h = VID_H - 4
+        changed = False
+        for i, path in st["pictures"].items():
+            if self._loaded.get(i) == path:
+                continue
+            pm = QPixmap(path)
+            if pm.isNull():
+                continue
+            self.frames[i] = pm if pm.height() == h else pm.scaledToHeight(h, Qt.SmoothTransformation)
+            self._loaded[i] = path
+            changed = True
+        if changed:
+            self._have = sorted(self.frames)
+        if st["done"] and len(self._loaded) >= len(st["pictures"]):
+            self._strip_done = True
+        elif th is not None and not th.is_alive():          # stopped short: once more, then left as it is
+            self._tries = getattr(self, "_tries", 0) + 1
+            if self._tries < 2:
+                self._strip_thread = None
+            else:
+                self._strip_done = True
+
+    def frame_at(self, t: float):
+        """The small picture nearest to `t` s of the video among those made so far (None: none yet)."""
+        if not self._have or self.step <= 0:
+            return None
+        import bisect
+        i = int(t / self.step + 0.5)
+        k = bisect.bisect_left(self._have, i)
+        best = [self._have[j] for j in (k - 1, k) if 0 <= j < len(self._have)]
+        return self.frames[min(best, key=lambda j: abs(j - i))]
 
 
 class _Canvas(QWidget):
@@ -203,7 +266,8 @@ class _Canvas(QWidget):
 
     def _paint_playhead(self, p, c):
         x = self.x_of(self.v.playhead)                                       # the playhead
-        p.setPen(QPen(QColor(c["accent"]), 1.5))
+        snapped = bool(self.drag and self.drag.get("snapped"))              # a line's end stuck to it: bolder
+        p.setPen(QPen(QColor(c["accent"]), 3 if snapped else 1.5))
         p.drawLine(QPointF(x, 4), QPointF(x, self.height()))
         tri = QPainterPath()
         tri.moveTo(x - 6, 2)
@@ -245,7 +309,16 @@ class _Canvas(QWidget):
             p.save()
             p.setClipPath(path)
             p.fillRect(r, QColor(c["video"]))
-            if info.thumb is not None:                       # the picture, repeated along the clip
+            if info.frames:                                  # film strip: each picture shows its own moment
+                w = next(iter(info.frames.values())).width() + 1
+                k = max(0, int((-r.left()) // w))                # the first one on screen
+                x = r.left() + 1 + k * w
+                right = min(r.right(), self.width())
+                while x < right:
+                    pm = info.frame_at(clip["in"] + (x - r.left()) / self.v.px)    # its left edge
+                    p.drawPixmap(QPointF(x, r.top() + 2), pm)
+                    x += w
+            elif info.thumb is not None:                     # until then: the one picture, repeated
                 w = info.thumb.width()
                 x = r.left() + 2
                 while x < r.right():
@@ -388,6 +461,8 @@ class _Canvas(QWidget):
             d["preview"] = tl
         else:                                                    # a subtitle line
             r = QRectF(d["rect0"])
+            dx, d["snapped"] = self._snap(kind, r, dx)
+            dt = dx / self.v.px
             if kind == "cue_move":
                 r.translate(dx, 0)
             elif kind == "cue_l":
@@ -397,6 +472,18 @@ class _Canvas(QWidget):
             d["rect"] = r
             d["dt"] = dt
         self.update()
+
+    SNAP = 8            # px: a dragged line's end this close to the playhead sticks to it
+
+    def _snap(self, kind, r0, dx):
+        """(dx, snapped): the dragged end (either end when the line is moved) sticks to the playhead when it
+        comes within SNAP px, so a line is easily put where the video is."""
+        x = self.x_of(self.v.playhead)
+        ends = [r0.left()] if kind == "cue_l" else [r0.right()] if kind == "cue_r" else [r0.left(), r0.right()]
+        best = min(((x - e) - dx for e in ends), key=abs)       # how far each end is from the playhead
+        if abs(best) <= self.SNAP:
+            return dx + best, True
+        return dx, False
 
     def mouseReleaseEvent(self, e):
         d, self.drag = self.drag, None
@@ -539,6 +626,9 @@ class TimelineView(QWidget):
     add_requested = Signal(list, int)       # videos dropped here, at clip index
     selected = Signal(object)               # ("clip", id) | ("cue", video, index) | None
     retimed = Signal(str, int, float, float)    # video, line index, start, end (its video's time)
+    retimed_back = Signal(str, int, float, float)   # the same, from undo / redo (not kept as a change again)
+    undo_requested = Signal()               # the undo / redo buttons: the window undoes whichever came last
+    redo_requested = Signal()               # (a timeline change, or a subtitle edit)
     edit_text = Signal(str, int)            # video, line index
 
     def __init__(self, duration_of):
@@ -572,8 +662,9 @@ class TimelineView(QWidget):
         self.b_left.clicked.connect(lambda: self.delete_side("left"))
         self.b_right.clicked.connect(lambda: self.delete_side("right"))
         self.b_delete.clicked.connect(self.delete_selected)
-        self.b_undo.clicked.connect(self.undo)
-        self.b_redo.clicked.connect(self.redo)
+        self.b_undo.clicked.connect(self.undo_requested.emit)
+        self.b_redo.clicked.connect(self.redo_requested.emit)
+        self.other_history = lambda: (False, False)      # the window: (subtitle edits to undo, to redo)
         self.b_zout.clicked.connect(lambda: self.zoom(1 / 1.4))
         self.b_zin.clicked.connect(lambda: self.zoom(1.4))
         self.b_fit.clicked.connect(self.fit)
@@ -648,13 +739,34 @@ class TimelineView(QWidget):
             self._videos[path].refresh()
             self.canvas.update()
 
+    # undo / redo: entries (stamp, "tl", Timeline before) or (stamp, "cue", video, index, (a, b) before, after);
+    # stamp: when it was done (or undone), so the window can undo whichever came last (timeline or table)
+    def _push(self, entry):
+        self._undo.append((time.monotonic(),) + entry)
+        del self._undo[:-50]
+        self._redo.clear()
+        self.refresh_history()
+
     def apply(self, tl: Timeline, undoable=True):
         if undoable:
-            self._undo.append(self.tl.copy())
-            del self._undo[:-50]
-            self._redo.clear()
+            self._push(("tl", self.tl.copy()))
         self.tl = tl
         self._changed()
+
+    def remember_cue(self, video, index, before, after):
+        """A line of a video that is not the open one was moved here: Ctrl+Z brings its times back."""
+        self._push(("cue", video, index, tuple(before), tuple(after)))
+
+    def undo_stamp(self) -> float:
+        return self._undo[-1][0] if self._undo else -1.0
+
+    def redo_stamp(self) -> float:
+        return self._redo[-1][0] if self._redo else -1.0
+
+    def refresh_history(self):
+        other_u, other_r = self.other_history()
+        self.b_undo.setEnabled(bool(self._undo) or bool(other_u))
+        self.b_redo.setEnabled(bool(self._redo) or bool(other_r))
 
     def set_timeline(self, tl: Timeline, store):
         """Another project is open: its timeline, kept by store(tl) on every change; undo starts over."""
@@ -676,8 +788,7 @@ class TimelineView(QWidget):
         self._update_scroll()
         for b in (self.b_split, self.b_delete, self.b_left, self.b_right):
             b.setEnabled(n > 0)
-        self.b_undo.setEnabled(bool(self._undo))
-        self.b_redo.setEnabled(bool(self._redo))
+        self.refresh_history()
         if save:
             self.changed.emit()
         self.canvas.update()
@@ -752,16 +863,25 @@ class TimelineView(QWidget):
             self.apply(tl)
 
     def undo(self):
-        if self._undo:
-            self._redo.append(self.tl.copy())
-            self.tl = self._undo.pop()
-            self._changed()
+        self._step(self._undo, self._redo)
 
     def redo(self):
-        if self._redo:
-            self._undo.append(self.tl.copy())
-            self.tl = self._redo.pop()
+        self._step(self._redo, self._undo)
+
+    def _step(self, src, dst):
+        if not src:
+            return
+        e = src.pop()
+        if e[1] == "tl":
+            dst.append((time.monotonic(), "tl", self.tl.copy()))
+            self.tl = e[2]
             self._changed()
+            return
+        _at, _k, video, index, before, after = e
+        dst.append((time.monotonic(), "cue", video, index, after, before))
+        self.retimed_back.emit(video, index, before[0], before[1])
+        self.refresh_history()
+        self.canvas.update()
 
     def retime(self, video, index, a, b, keep_length=False):
         """A line dragged: kept inside its video and between its neighbours (moved: same length)."""

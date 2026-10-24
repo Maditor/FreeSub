@@ -19,7 +19,12 @@ DIST = os.path.join(ROOT, "dist", "FreeSub")
 ADDON_PACKAGES = ("piper-tts", "nvidia-cublas-cu12", "nvidia-cudnn-cu12")
 NOT_SHIPPED = ADDON_PACKAGES + ("pip", "setuptools", "wheel", "pyinstaller", "pyinstaller-hooks-contrib",
                                 "altgraph", "pefile", "pywin32-ctypes", "packaging", "nvidia-cuda-runtime-cu12",
-                                "nvidia-cuda-nvrtc-cu12")
+                                "nvidia-cuda-nvrtc-cu12",
+                                # left in a .venv by the Qwen3-ASR test, never in the exe (FreeSub.spec excludes them)
+                                "torch", "transformers", "accelerate", "librosa", "numba", "llvmlite", "qwen-asr",
+                                "nagisa", "soynlp", "sympy", "mpmath", "networkx", "safetensors", "soundfile",
+                                "soxr", "audioread", "lazy-loader", "pooch", "scikit-learn", "scipy", "joblib",
+                                "threadpoolctl", "msgpack", "dynet38", "cython")
 
 NOTICE = f"""{APP_NAME} {APP_VERSION} - {APP_URL}
 

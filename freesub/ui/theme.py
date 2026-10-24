@@ -73,11 +73,46 @@ class _ScrollHover(QObject):
 _HOVER = {}
 
 
+SUBMENU_GAP = 2      # px between a menu and its submenu
+
+
+def place_submenu(menu) -> bool:
+    """A submenu right next to its menu, never over it: Qt's own place ignores the stylesheet's border, padding
+    and round corners of QMenu, so the submenu sat on top of the menu. Left of it when there is no room on the
+    right. Returns True when it was moved."""
+    parent = menu.parentWidget()        # inherits(), not isinstance(): i18n swaps QMenu for a subclass in Python,
+    # but a submenu Qt makes itself is a plain QMenu
+    if parent is None or not parent.inherits("QMenu") or not parent.isVisible() or menu.menuAction() not in parent.actions():
+        return False
+    pg, g = parent.geometry(), menu.geometry()
+    screen = parent.screen().availableGeometry() if parent.screen() else None
+    x = pg.right() + 1 + SUBMENU_GAP
+    if screen is not None and x + g.width() > screen.right() + 1:
+        x = pg.left() - SUBMENU_GAP - g.width()
+    if x == g.x():
+        return False
+    menu.move(x, g.y())
+    return True
+
+
+class _MenuPlace(QObject):
+    """Every submenu of the app: placed by place_submenu when it opens, and again if Qt moves it back after
+    showing it (a no-op when it is already in its place, so its own move does not loop)."""
+
+    def eventFilter(self, obj, e):
+        if e.type() in (QEvent.Show, QEvent.Move) and obj.isWidgetType() and obj.inherits("QMenu") \
+                and obj.isVisible():
+            place_submenu(obj)
+        return False
+
+
 def apply(app, mode: str):
     """mode: system | light | dark."""
     if "f" not in _HOVER:
         _HOVER["f"] = _ScrollHover()
         app.installEventFilter(_HOVER["f"])
+        _HOVER["m"] = _MenuPlace()
+        app.installEventFilter(_HOVER["m"])
     dark = system_is_dark() if mode == "system" else mode == "dark"
     c = DARK if dark else LIGHT
     _current.update(name="dark" if dark else "light", c=c)
@@ -121,10 +156,14 @@ def _check_image(color: str, kind: str = "check") -> str:
     from PySide6.QtGui import QImage, QPainter
     from PySide6.QtSvg import QSvgRenderer
     from ..config import data_dir
-    d = {"check": "M3.6 8.3l2.9 2.9 5.9-6.4", "down": "M4 6l4 4 4-4", "up": "M4 10l4-4 4 4"}[kind]
-    w = 1.8 if kind == "check" else 1.3
-    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="{d}" fill="none" '
-           f'stroke="{color}" stroke-width="{w}" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    if kind == "dot":                             # the chosen radio button: a dot in the filled circle
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+               f'<circle cx="8" cy="8" r="3.4" fill="{color}"/></svg>')
+    else:
+        d = {"check": "M3.6 8.3l2.9 2.9 5.9-6.4", "down": "M4 6l4 4 4-4", "up": "M4 10l4-4 4 4"}[kind]
+        w = 1.8 if kind == "check" else 1.3
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="{d}" fill="none" '
+               f'stroke="{color}" stroke-width="{w}" stroke-linecap="round" stroke-linejoin="round"/></svg>')
     path = os.path.join(data_dir(), "ui", f"{kind}_{color.strip('#')}.png")
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -142,6 +181,7 @@ def _check_image(color: str, kind: str = "check") -> str:
 
 def stylesheet(c: dict) -> str:
     chk, down, up = _check_image(c["accent_fg"]), _check_image(c["muted"], "down"), _check_image(c["muted"], "up")
+    dot = _check_image(c["accent_fg"], "dot")
     return f"""
 QMainWindow, QDialog {{ background: {c['bg']}; }}
 QToolTip {{ background: {c['raised']}; color: {c['fg']}; border: 1px solid {c['border']}; border-radius: 4px; padding: 5px 8px; }}
@@ -150,7 +190,7 @@ QToolTip {{ background: {c['raised']}; color: {c['fg']}; border: 1px solid {c['b
 #Header, #CommandBar {{ background: {c['bg']}; }}
 #AppTitle {{ font-size: 14px; font-weight: 600; }}
 #Muted, QLabel[muted="true"] {{ color: {c['muted']}; }}
-#SectionTitle {{ font-size: 12px; font-weight: 600; color: {c['fg']}; }}
+#SectionTitle {{ font-family: "Times New Roman", serif; font-size: 14px; font-weight: 700; color: {c['fg']}; }}
 #PanelTitle {{ font-size: 20px; font-weight: 600; }}
 #PaneTitle {{ font-size: 13px; font-weight: 600; padding: 2px 0; }}
 #Soon {{ color: {c['muted']}; font-size: 13px; }}
@@ -199,11 +239,24 @@ QComboBox::drop-down {{ border: none; width: 26px; }}
 QComboBox::down-arrow {{ image: url({down}); width: 12px; height: 12px; }}
 QComboBox QAbstractItemView {{ background: {c['raised']}; border: 1px solid {c['border']}; border-radius: 6px;
     selection-background-color: {c['hover']}; selection-color: {c['fg']}; outline: none; padding: 4px; }}
+QFrame#UnitField {{ background: {c['field']}; border: 1px solid {c['border']};
+    border-bottom-color: {c['stroke_strong']}; border-radius: 4px; }}
+QFrame#UnitField:hover {{ background: {c['hover']}; }}
+QFrame#UnitField QSpinBox, QFrame#UnitField QDoubleSpinBox {{ background: transparent; border: none; padding: 0;
+    min-height: 22px; }}
+QFrame#UnitField QSpinBox:focus, QFrame#UnitField QDoubleSpinBox:focus {{ border: none; background: transparent; }}
+QFrame#UnitField QLineEdit {{ background: transparent; border: none; padding: 0; min-height: 0; }}
+QLabel#UnitText {{ color: {c['muted']}; background: transparent; }}
+QFrame#StyleDivider {{ background: {c['border']}; border: none; }}
 QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button {{ width: 18px; border: none; }}
+QSpinBox[bare="true"]::up-button, QSpinBox[bare="true"]::down-button, QDoubleSpinBox[bare="true"]::up-button,
+QDoubleSpinBox[bare="true"]::down-button {{ subcontrol-origin: border; width: 0px; border: none; }}
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url({up}); width: 10px; height: 10px; }}
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url({down}); width: 10px; height: 10px; }}
 
 QCheckBox {{ spacing: 8px; }}
+QCheckBox#TickBox {{ spacing: 0px; }}
+QLabel#TickText[hot="true"] {{ color: {c['fg']}; }}
 QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 4px; border: 1px solid {c['faint']}; background: {c['field']}; }}
 QCheckBox::indicator:hover {{ background: {c['hover']}; }}
 QCheckBox::indicator:checked {{ background: {c['accent']}; border-color: {c['accent']}; image: url({chk}); }}
@@ -212,7 +265,10 @@ QCheckBox::indicator:disabled {{ border-color: {c['border']}; }}
 QCheckBox::indicator:checked:disabled {{ background: {c['faint']}; border-color: {c['faint']}; }}
 QRadioButton {{ spacing: 8px; }}
 QRadioButton::indicator {{ width: 18px; height: 18px; border-radius: 10px; border: 1px solid {c['faint']}; background: {c['field']}; }}
-QRadioButton::indicator:checked {{ background: {c['accent_fg']}; border: 5px solid {c['accent']}; }}
+QRadioButton::indicator:hover {{ background: {c['hover']}; }}
+QRadioButton::indicator:checked {{ background: {c['accent']}; border-color: {c['accent']}; image: url({dot}); }}
+QRadioButton::indicator:checked:hover {{ background: {c['accent_hover']}; border-color: {c['accent_hover']}; }}
+QRadioButton::indicator:checked:disabled {{ background: {c['faint']}; border-color: {c['faint']}; }}
 
 QTabWidget::pane {{ border: none; }}
 QTabBar {{ qproperty-drawBase: 0; }}
@@ -267,7 +323,9 @@ QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 6px; }}
 QToolButton#FindDrop {{ background: {c['field']}; border: 1px solid {c['border']}; border-radius: 4px; padding: 3px 22px 3px 10px; }}
 QToolButton#FindDrop:hover {{ background: {c['hover']}; }}
 QToolButton#FindDrop::menu-indicator {{ subcontrol-origin: padding; subcontrol-position: center right; right: 6px; }}
-#CardTitle {{ font-size: 13px; font-weight: 600; }}
+#CardTitle {{ font-family: "Times New Roman", serif; font-size: 16px; font-weight: 700; }}
+#GroupTitle {{ font-family: "Times New Roman", serif; font-size: 15px; font-weight: 700; color: {c['accent']}; }}
+#GroupLine {{ background: {c['border']}; border: none; }}
 #CardTitle:disabled {{ color: {c['faint']}; }}
 QPushButton#SegFirst, QPushButton#SegMid, QPushButton#SegLast {{ background: {c['button']}; border: 1px solid {c['border']};
     padding: 5px 10px; border-radius: 0; font-weight: 400; }}

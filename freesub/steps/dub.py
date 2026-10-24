@@ -5,7 +5,7 @@ For every line:
   * a voice is picked from the guessed speaker gender (Edge: female / male voice),
   * the clip is made (Edge online, Piper / Kokoro offline) and cached in dub/ (a rerun reuses it),
   * readings are joined, moved a little and only then read faster (timing.py), never faster than
-    dub_max_speed.
+    dub_max_pct (a % of normal speed, like tts_speed: the minimum speed).
 The clips are laid on a voice track (dub.wav) and mixed with the video's own sound, which is turned down to
 dub_orig_volume while a line is read and comes back between lines (like TV voice-over).
 """
@@ -179,8 +179,8 @@ def track_params(src, n, project=None) -> dict:
     s = settings()
     return {"engine": s["tts_engine"], "f": s["tts_edge_female"], "m": s["tts_edge_male"],
             "kf": s["tts_kokoro_female"], "km": s["tts_kokoro_male"],
-            "speed": s["tts_speed"], "respell": s["tts_respell"], "max": s["dub_max_speed"],
-            "join": bool(s["dub_join"]), "timing": 2, "one": s["voice_mode"] != "split",
+            "speed": s["tts_speed"], "respell": s["tts_respell"], "max": ceiling_pct(s),
+            "join": auto(s), "timing": 2, "one": s["voice_mode"] != "split",
             "voices": voices_sig(project) if project is not None and s["voice_mode"] == "split" else "",
             "srt": os.path.getmtime(src), "n": n}
 
@@ -343,9 +343,11 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
     preview can play the narration while the rest is being made."""
     from collections import deque
 
-    from .timing import Grouper, Scheduler
+    from .timing import Grouper, Scheduler, run_on_limit
     s = settings()
     base = int(s["tts_speed"])
+    ceiling = ceiling_pct(s)                                  # the maximum speed: nothing is read faster than this
+    fastest = base
     n = len(cues)
     workers = 4 if voice.engine == "edge" else 1
     total = int((duration + 3.0) * RATE)
@@ -354,10 +356,11 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
     clear_live(project)
     os.makedirs(live, exist_ok=True)
     acc = np.memmap(project.path("dub.f32"), dtype=np.float32, mode="w+", shape=(total,))
-    grouper = Grouper(cues, genders, duration, voice.engine, base, join=bool(s["dub_join"]))
-    sched = Scheduler(float(s["dub_max_speed"]), duration)
-    spans, stats = [], {"joined": 0, "faster": 0, "late": 0}
+    grouper = Grouper(cues, genders, duration, voice.engine, base, join=auto(s))
+    sched = Scheduler(max_factor(s), duration)
+    spans, stats = [], {"joined": 0, "faster": 0, "late": 0, "over": 0}
     lines = [None] * n                 # when each subtitle line is actually read (for the subtitles to follow)
+    rows = [None] * n                  # per line: its text, how late it ran, the clips it used (the table)
 
     def reading(u):
         control.check()
@@ -365,7 +368,8 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
         return clip, _trim_silence(_decode(clip))
 
     pending = deque()
-    ex = ThreadPoolExecutor(max_workers=workers)
+    over = settings().current_overlay()            # the voice makers use this video's settings too
+    ex = ThreadPoolExecutor(max_workers=workers, initializer=settings().adopt, initargs=(over,))
     try:
         k = 0
         while pending or not grouper.done():
@@ -374,26 +378,36 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
                 pending.append((u, ex.submit(reading, u)))
             u, fut = pending.popleft()
             clip, a = fut.result()
+            used = [os.path.basename(clip)]
             control.check()
             length = len(a) / RATE
             grouper.measured(u.text, length)
             start, speed = sched.place(u, length, grouper.ahead(u.next_start))
+            rate, tempo = base, 1.0                          # the speed this reading really has: rate x tempo
             if speed > 1.02:
                 want = length / speed                        # the time it has
                 if speed >= 1.08:
                     try:                                     # a faster reading sounds better than squeezing
-                        clip2 = voice.clip(u.text, u.gender, int(round(base * speed * 1.02)))
-                        a2 = _trim_silence(_decode(clip2))
-                        if len(a2):
-                            clip, a = clip2, a2
+                        rate2 = min(ceiling, int(round(base * speed * 1.02)))
+                        if rate2 > base:
+                            clip2 = voice.clip(u.text, u.gender, rate2)
+                            a2 = _trim_silence(_decode(clip2))
+                            used.append(os.path.basename(clip2))
+                            if len(a2):
+                                clip, a, rate = clip2, a2, rate2
                     except Cancelled:
                         raise
                     except Exception as e:  # noqa: BLE001
                         log.info("Faster voice failed (%s): squeezing the clip", e)
                 rest = len(a) / RATE / max(0.1, want)
-                if rest > 1.02:                              # what is left: squeeze, a little
-                    a = _trim_silence(_decode(clip, tempo=min(1.2, rest)))
+                tempo = min(1.2, rest, ceiling / rate)       # what is left: squeeze, a little, never past the maximum
+                if rest > 1.02 and tempo > 1.01:
+                    a = _trim_silence(_decode(clip, tempo=tempo))
+                else:
+                    tempo = 1.0
                 stats["faster"] += 1
+            pct = int(round(rate * tempo))
+            fastest = max(fastest, pct)
             if len(u.lines) > 1:
                 stats["joined"] += len(u.lines) - 1
             if start - u.start > 0.5:
@@ -404,6 +418,9 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
                 acc[a0:a1] += a[:a1 - a0]          # full level: the narration volume is applied when mixing
             end = start + len(a) / RATE
             sched.ended(end)
+            over = end - run_on_limit(u, duration)            # past its time even at the speed it got
+            if over > LATE:
+                stats["over"] += len(u.lines)
             spans.append([round(start, 3), round(end, 3)])
             from .timing import syllables
             weights = [syllables(cues[k].text) for k in u.lines]     # a joined reading: share it by length
@@ -411,6 +428,8 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
             for k, wgt in zip(u.lines, weights):
                 t1 = t + (end - start) * wgt / total_w
                 lines[k] = [round(t, 3), round(t1, 3)]
+                rows[k] = {"s": round(cues[k].start, 3), "t": cues[k].text, "pct": pct,
+                           "over": round(over, 2) if over > LATE else 0, "clips": used}
                 t = t1
             _write_live(live, live_name(u.lines[0], start, u.slot0, u.slot1), a)
             k = u.lines[-1] + 1
@@ -421,8 +440,12 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
     ex.shutdown(wait=True)
     log.info("Narration timing: %d lines joined, %d readings faster, %d started late", stats["joined"],
              stats["faster"], stats["late"])
+    log.info("Narration speed: minimum %d %%, maximum %d %%, the fastest reading was %d %%", base, ceiling, fastest)
+    if stats["over"]:
+        log.info("Narration: %d lines are read late (too long even at the maximum speed): marked in the subtitle "
+                 "table", stats["over"])
     with open(project.path(PLACED), "w", encoding="utf-8") as f:
-        json.dump({"spans": spans, "lines": lines, "srt": stamp}, f)
+        json.dump({"spans": spans, "lines": lines, "srt": stamp, "rows": rows}, f)
     acc.flush()
     with wave.open(path, "wb") as w:
         w.setnchannels(1)
@@ -439,6 +462,60 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
     return path
 
 
+LATE = 0.15        # a reading ending this much past where it may end (timing.run_on_limit) is "read late"
+
+
+def line_marks(project) -> dict:
+    """What the last narration found per line, for the subtitle table: {start (0.1 s): {"t": text read,
+    "over": seconds past its time (0 = in time), "pct": speed %, "clips": [files]}}. By start time, not by line
+    number, so the marks stay on their lines while lines are edited, added or deleted until the next narration."""
+    try:
+        with open(project.path(PLACED), encoding="utf-8") as f:
+            rows = json.load(f).get("rows") or []
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return {round(r["s"], 1): r for r in rows if isinstance(r, dict) and "s" in r}
+
+
+def forget_clips(project, starts) -> int:
+    """'Make the voice again' for some lines: their saved clips are deleted, so the next narration reads them
+    fresh (an edited line gets a new clip anyway). Returns how many files went."""
+    marks = line_marks(project)
+    folder = project.path("dub")
+    gone = 0
+    for t in {round(x, 1) for x in starts}:
+        for name in (marks.get(t) or {}).get("clips") or []:
+            path = os.path.join(folder, os.path.basename(name))
+            try:
+                os.remove(path)
+                gone += 1
+            except OSError:
+                pass
+    return gone
+
+
+def auto(s=None) -> bool:
+    """'Adjust the reading speed and subtitles automatically' (on by default): read faster up to the maximum
+    when a line needs it and join short lines. Off: every line at the one reading speed (tts_speed)."""
+    s = s or settings()
+    return bool(s.get("dub_auto", True))
+
+
+def ceiling_pct(s=None) -> int:
+    """The fastest a line may be read, in % of normal speed: dub_max_pct (never under tts_speed, the voices
+    stop at 200 %); just tts_speed when the automatic speed is off."""
+    s = s or settings()
+    base = int(s["tts_speed"])
+    return max(base, min(200, int(s["dub_max_pct"]))) if auto(s) else base
+
+
+def max_factor(s=None) -> float:
+    """How many times faster than the minimum speed (tts_speed) a line may be read: the maximum speed
+    divided by the minimum speed, both in % of normal speed (the voices stop at 200 %). Never below 1."""
+    s = s or settings()
+    return max(1.0, ceiling_pct(s) / max(1.0, float(s["tts_speed"])))
+
+
 DUCK = 0.3              # how far the original voice goes down while the narration speaks
 VOICE = "voice.wav"     # the original voice alone (original sound - music.wav), for the live preview
 
@@ -446,7 +523,15 @@ VOICE = "voice.wav"     # the original voice alone (original sound - music.wav),
 def mix_params(project) -> dict:
     s = settings()
     return {"narr": s["dub_volume"], "bg": s["dub_bg_volume"], "voice": s["dub_voice_volume"],
-            "duck": bool(s["dub_duck"]), "music": project.has("music.wav")}
+            "duck": bool(s["dub_duck"]), "music": uses_music(project, s)}
+
+
+def uses_music(project, s=None) -> bool:
+    """The mix keeps the music and the original voice apart (three volumes) only when 'Separate voice and
+    background → For the narration' is on (Settings → Advanced) and music.wav was made; otherwise the whole
+    original sound is one track ('Original sound' volume), even if the subtitles step separated it."""
+    s = s or settings()
+    return bool(s["dub_separate"]) and project.has("music.wav")
 
 
 def mix_levels() -> dict:
@@ -474,7 +559,7 @@ def preview_sources(project):
     """What the preview needs to play the mix live: ({"narr", "bg", "voice"}, narration lines) or (None, [])."""
     if not (project.has(DUB) and project.has("orig44.wav")):
         return None, []
-    music = project.has("music.wav") and project.has(VOICE)
+    music = uses_music(project) and project.has(VOICE)
     src = {"narr": project.path(DUB),
            "bg": project.path("music.wav") if music else project.path("orig44.wav"),
            "voice": project.path(VOICE) if music else None}
@@ -524,7 +609,7 @@ def _mix(project, control, track, cues, duration):
     The original voice (or the whole original sound) goes down while a narration line plays (ducking)."""
     lv = mix_levels()
     orig = original_sound(project, control, duration)
-    music = project.path("music.wav") if project.has("music.wav") else None
+    music = project.path("music.wav") if uses_music(project) else None
     out = project.path(MIX)
     tmp = out + ".part.wav"
     vtmp = project.path(VOICE) + ".part.wav"

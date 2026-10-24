@@ -5,7 +5,7 @@ import threading
 
 from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
-from ..i18n import tr
+from ..i18n import Keep, tr
 from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QScrollArea,
                                QVBoxLayout, QWidget)
 
@@ -146,7 +146,8 @@ class VideoCard(QFrame):
         for key, ic, tip in CHIPS:
             state = self.states.get(key, "")
             self.chip[key].setPixmap(icons.pixmap(ic, col.get(state, c["faint"]), 18))
-            self.chip[key].setToolTip(f"{tip}: {state or 'not done'}")
+            word = {"done": "done", "failed": "failed", "running": "running"}.get(state, "not done")
+            self.chip[key].setToolTip(f"{tr(tip)}: {tr(word)}")
         self.b_set.tint = "accent" if self._own else None
         self.b_set.refresh_icon()
 
@@ -171,8 +172,9 @@ class VideoCard(QFrame):
         else:
             self.bar.setRange(0, 0)
         if text:
-            self.state.setText(text if len(text) < 34 else text[:32] + "…")
-            self.state.setToolTip(text)
+            t = tr(text)                            # translated first: a cut text matches no translation
+            self.state.setText(Keep(t if len(t) < 34 else t[:32] + "…"))
+            self.state.setToolTip(Keep(t))
 
     def waiting(self):
         self.state.setText("Waiting")
@@ -187,6 +189,7 @@ class VideoCard(QFrame):
 class BatchPage(QWidget):
     open_requested = Signal(str)          # open a video in the editor
     run_requested = Signal(str, list)     # "export" | "subs", videos
+    own_changed = Signal(str)             # a video's own settings (gear) were changed
     stop_requested = Signal()
     add_files = Signal()
     add_folder = Signal()
@@ -283,6 +286,7 @@ class BatchPage(QWidget):
         from .video_settings import VideoSettingsDialog
         if VideoSettingsDialog(v, self).exec():
             self.cards[v].refresh()
+            self.own_changed.emit(v)
 
     def _counts(self):
         n = len(self.order)
@@ -298,7 +302,7 @@ class BatchPage(QWidget):
         self.scroll.setVisible(n > 0)
         self.empty.setVisible(n == 0)
         for b in (self.b_run, self.b_subs):
-            b.setEnabled(bool(self.checked()) and not self.b_stop.isVisible())
+            b.setEnabled(bool(self.checked()))
 
     # ---- grid that follows the width: as many cards per row as fit, spread over the whole width
     def eventFilter(self, obj, e):
@@ -332,8 +336,7 @@ class BatchPage(QWidget):
         for w in (self.b_add, self.b_folder, self.all):
             w.setEnabled(not running)
         for c in self.cards.values():               # the gear stays: changes count for videos not started yet
-            c.b_rm.setEnabled(not running)
-            c.check.setEnabled(not running)
+            c.b_rm.setEnabled(not running)          # ticks stay: Run / Export adds the ticked ones to the run
         self._counts()
 
     def queued(self, videos):

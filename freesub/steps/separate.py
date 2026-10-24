@@ -8,9 +8,19 @@ Model: MDX-Net "Kim Vocal 2" (from the Ultimate Vocal Remover public models), ru
 Files in the project folder:
     vocals.wav   16 kHz mono voice (what Whisper hears)
     music.wav    44.1 kHz stereo background without the voice
+
+The model runs in a child process (`main.py --separate JOB.json`): ONNX Runtime keeps Python's lock while it
+loads a model (seconds with DirectML), which froze the window when it ran in FreeSub itself. The child writes its
+progress as JSON lines to a file; Stop ends it. If the child cannot run at all, the separation runs here as
+before.
 """
+import atexit
+import json
 import logging
 import os
+import subprocess
+import sys
+import tempfile
 import time
 import wave
 
@@ -196,7 +206,7 @@ def run(project: Project, control, force=False, name=DEFAULT, use_gpu=True) -> s
             args += ["-map", f"0:{stream}" if stream is not None else "0:a:0"]
             args += ["-ac", "2", "-ar", str(RATE), "-c:a", "pcm_s16le", mix]
             ffmpeg.run(args, duration=duration, control=control, label="Reading the soundtrack")
-            device = _separate(mix, v44, m_tmp, name, use_gpu, control)
+            device = _separate_child(mix, v44, m_tmp, name, use_gpu, control)
             control.progress(None, "Preparing the voice for speech recognition…")
             ffmpeg.run(["-i", v44, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", out_v], duration=duration,
                        control=control, label="Preparing voice")
@@ -280,3 +290,174 @@ def _separate(src, out_vocals, out_music, name, use_gpu, control) -> str:
         wm.close()
     log.info("Separation on %s: %.1f s for %.1f s of audio", device, time.time() - t0, total / RATE)
     return device
+
+
+# ------------------------------------------------------------------ the child process
+_CHILDREN: set = set()
+
+
+@atexit.register
+def _stop_children():
+    for p in list(_CHILDREN):
+        try:
+            p.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _child_cmd(job: str) -> list:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--separate", job]
+    from ..config import app_dir
+    return [sys.executable, os.path.join(app_dir(), "main.py"), "--separate", job]
+
+
+class ChildFailed(Exception):
+    """The child process could not run the separation (it did not start, or ended without an answer)."""
+
+
+def _separate_child(src, out_vocals, out_music, name, use_gpu, control) -> str:
+    """_separate() in a child process; the progress goes on to `control`, Stop ends the child. A child that
+    cannot run (no answer at all) falls back to running it here."""
+    try:
+        return _run_child(src, out_vocals, out_music, name, use_gpu, control)
+    except ChildFailed as e:
+        log.warning("Voice separation could not run in its own process (%s): running it in FreeSub", e)
+        return _separate(src, out_vocals, out_music, name, use_gpu, control)
+
+
+def _run_child(src, out_vocals, out_music, name, use_gpu, control) -> str:
+    fd, job = tempfile.mkstemp(prefix="freesub_sep_", suffix=".json")
+    os.close(fd)
+    prog, result = job[:-5] + ".progress", job[:-5] + ".result"
+    for f in (prog, result):
+        open(f, "w").close()
+    with open(job, "w", encoding="utf-8") as f:
+        json.dump({"src": src, "vocals": out_vocals, "music": out_music, "name": name,
+                   "use_gpu": bool(use_gpu and not _GPU_LOST["lost"]), "progress": prog, "result": result}, f)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        p = subprocess.Popen(_child_cmd(job), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, creationflags=flags)
+    except OSError as e:
+        _remove(job, prog, result)
+        raise ChildFailed(str(e)) from e
+    _CHILDREN.add(p)
+    seen = 0
+    try:
+        while True:
+            done = p.poll() is not None
+            seen = _forward(prog, seen, control)
+            if done:
+                break
+            try:
+                control.check()
+            except Cancelled:
+                p.kill()
+                p.wait(timeout=10)
+                raise
+            time.sleep(0.15)
+        err = p.stderr.read().decode("utf-8", "replace") if p.stderr else ""
+        try:
+            with open(result, encoding="utf-8") as f:
+                res = json.load(f)
+        except (OSError, ValueError):
+            res = None
+        if not res:
+            raise ChildFailed(f"exit code {p.returncode}: {err.strip()[-300:]}")
+        if res.get("gpu_lost"):
+            _GPU_LOST["lost"] = True
+        if res.get("error"):
+            raise RuntimeError(res["error"])
+        return res.get("device") or "CPU"
+    finally:
+        _CHILDREN.discard(p)
+        if p.poll() is None:
+            p.kill()
+        if p.stderr:
+            p.stderr.close()
+        _remove(job, prog, result)
+
+
+def _forward(path, seen, control) -> int:
+    """Pass the child's new progress lines on; returns how far the file was read."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(seen)
+            data = f.read()
+    except OSError:
+        return seen
+    end = data.rfind(b"\n")
+    if end < 0:
+        return seen
+    for line in data[:end].splitlines():
+        try:
+            m = json.loads(line.decode("utf-8"))
+        except ValueError:
+            continue
+        if "log" in m:
+            log.log(int(m.get("level", logging.INFO)), "%s", m["log"])
+        elif "s" in m:
+            control.status(m["s"])
+        elif "t" in m:
+            control.progress(m.get("p"), m["t"])
+    return seen + end + 1
+
+
+def _remove(*paths):
+    for f in paths:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
+class _ChildControl:
+    """What _separate() calls on its control, written to the progress file (Stop: the parent ends the child)."""
+
+    def __init__(self, path):
+        self.f = open(path, "a", encoding="utf-8")
+
+    def _put(self, m):
+        self.f.write(json.dumps(m, ensure_ascii=False) + "\n")
+        self.f.flush()
+
+    def progress(self, frac, text=""):
+        self._put({"p": frac, "t": text})
+
+    def status(self, text):
+        self._put({"s": text})
+
+    def check(self):
+        pass
+
+
+class _LogToParent(logging.Handler):
+    def __init__(self, ctl):
+        super().__init__(logging.INFO)
+        self.ctl = ctl
+
+    def emit(self, record):
+        try:
+            self.ctl._put({"log": record.getMessage(), "level": record.levelno})
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def child_main(job_path: str) -> int:
+    """`main.py --separate JOB.json`: run the separation described in the job, answer in its result file."""
+    with open(job_path, encoding="utf-8") as f:
+        job = json.load(f)
+    ctl = _ChildControl(job["progress"])
+    handler = _LogToParent(ctl)
+    logging.getLogger("freesub").addHandler(handler)
+    logging.getLogger("freesub").setLevel(logging.INFO)
+    res = {}
+    try:
+        res["device"] = _separate(job["src"], job["vocals"], job["music"], job["name"], job["use_gpu"], ctl)
+    except Exception as e:  # noqa: BLE001
+        res["error"] = str(e) or type(e).__name__
+    res["gpu_lost"] = _GPU_LOST["lost"]
+    with open(job["result"], "w", encoding="utf-8") as f:
+        json.dump(res, f)
+    return 0

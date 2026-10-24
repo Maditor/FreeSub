@@ -28,7 +28,7 @@ from .export_dialog import ExportDialog
 from .settings_dialog import SettingsDialog
 from .style_panel import StylePanel
 from ..i18n import tr
-from .widgets import CommandButton, IconButton, Marquee, confirm, label, separator, wait_cursor
+from .widgets import CommandButton, IconButton, Marquee, confirm, separator, wait_cursor
 
 log = logging.getLogger(__name__)
 
@@ -111,8 +111,8 @@ class MainWindow(QMainWindow):
         self.home = Home()
         self.editor = Editor()
         self.recipe = Recipe()
-        self.progress = ProgressPanel(self.runner)          # small: what is running, in the command bar
-        for w in (self.progress, self.c_run, self.c_export, separator(), self.b_theme, self.b_settings):
+        self.progress = ProgressPanel(self.runner)          # what is running: at the bottom of the media column
+        for w in (self.c_run, self.c_export, separator(), self.b_theme, self.b_settings):
             hl.addWidget(w)
         self.frameless = None
         if own_bar:                                  # the command bar is the window's title bar
@@ -155,7 +155,13 @@ class MainWindow(QMainWindow):
         left_scroll.setFrameShape(QFrame.NoFrame)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         left_scroll.setWidget(left_box)
-        left = _panel(left_scroll)
+        left_col = QWidget()                        # the media list scrolls; the progress stays at the bottom
+        lcl = QVBoxLayout(left_col)
+        lcl.setContentsMargins(0, 0, 0, 0)
+        lcl.setSpacing(10)
+        lcl.addWidget(left_scroll, 1)
+        lcl.addWidget(self.progress)
+        left = _panel(left_col)
         left.setFixedWidth(250)
         # Inspector (right): the recipe steps, the subtitle style and the cut, as tabs
         self.inspector = QTabWidget()
@@ -178,10 +184,6 @@ class MainWindow(QMainWindow):
         self.inspector.addTab(style_scroll, "Style")
         settings().style_sink = self._style_sink
         right = self.right = _panel(self.inspector, (12, 6, 12, 12))
-        self.lock_note = label("Locked while FreeSub is working", muted=True)
-        self.lock_note.setAlignment(Qt.AlignCenter)
-        self.lock_note.setVisible(False)
-        right.layout().insertWidget(0, self.lock_note)
         right.setMinimumWidth(420)
         # the left column sits OUTSIDE the splitter: fixed width, always flush with the video (a splitter
         # leaves a gap next to a fixed-width widget when a saved layout gives it more room)
@@ -249,12 +251,12 @@ class MainWindow(QMainWindow):
         self.queue.b_add.clicked.connect(lambda: (self.queue.add_files(), self._after_add()))
         self.queue.b_folder.clicked.connect(lambda: (self.queue.add_folder(), self._after_add()))
         self.c_export.clicked.connect(lambda: self.run_kind("export"))
-        self.c_run.clicked.connect(lambda: self.run_kind("run"))
+        self.c_run.clicked.connect(self._run_or_stop)
         for b in (self.batch.b_subs, self.batch.b_run):
             b.hide()                                         # the command bar has them
         self.batch.open_requested.connect(self._batch_open)
         self.batch.run_requested.connect(lambda kind, videos: self.start(kind, videos))
-        self.batch.stop_requested.connect(self.runner.stop)
+        self.batch.stop_requested.connect(self._stop_asked)
         self.batch.add_files.connect(lambda: (self.queue.add_files(), self._batch_refresh()))
         self.batch.add_folder.connect(lambda: (self.queue.add_folder(), self._batch_refresh()))
         self.batch.remove_requested.connect(self._batch_remove)
@@ -272,6 +274,11 @@ class MainWindow(QMainWindow):
         self.queue.reset_requested.connect(self.reset_video)
         self.editor.import_requested.connect(lambda kind: self.queue.import_srt(None, kind))
         self.editor.redo_requested.connect(self.redo_subtitles)
+        self.editor.remake_voice.connect(self.remake_lines)
+        self.editor.cues_changed.connect(lambda: self._touch([self.editor.project.video] if self.editor.project else []))
+        self.batch.own_changed.connect(lambda v: self._touch([v]))
+        self.runner.video_finished.connect(lambda v, r: self._run_results.__setitem__(v, r))
+        self._touched, self._run_results, self._pending = {}, {}, None
         self.editor.seek.connect(self.preview.seek)
         self.editor.cues_changed.connect(self._cues_to_preview)
         self.preview.position_changed.connect(self.editor.highlight)
@@ -282,6 +289,11 @@ class MainWindow(QMainWindow):
         self.timeline.add_requested.connect(self._tl_add)
         self.timeline.selected.connect(self._tl_selected)
         self.timeline.retimed.connect(self._tl_retimed)
+        self.timeline.retimed_back.connect(lambda v, i, a, b: self._tl_retimed(v, i, a, b, undoing=True))
+        self.timeline.undo_requested.connect(self._undo)
+        self.timeline.redo_requested.connect(self._redo)
+        self.timeline.other_history = lambda: (self.editor.undo_stamp() >= 0, self.editor.redo_stamp() >= 0)
+        self.editor.cues_changed.connect(self.timeline.refresh_history)
         self.timeline.edit_text.connect(self._tl_edit_text)
         self.style.line_back.connect(lambda: self.timeline.select(None))
         self.style.line_text_changed.connect(self._line_text_changed)
@@ -296,13 +308,17 @@ class MainWindow(QMainWindow):
         self.recipe.area_requested.connect(self._ask_area)
         self.recipe.keys_requested.connect(lambda: self.open_settings("translation"))
         self.recipe.download_whisper.connect(self.download_model)
+        self.recipe.subtitle_source = self._names_source
+        self.preview.which_changed.connect(self._cues_to_preview)
         self.recipe.download_voice.connect(self.download_voice)
         self.recipe.changed.connect(self._recipe_changed)
         self.recipe.mix_changed.connect(lambda: self.preview.mix.refresh_levels())
         self.recipe.narration_preview.connect(self.preview_narration)
+        self.recipe.sync_changed.connect(self.editor.sync_voice_button)
+        self.editor.b_voice.toggled.connect(lambda _on: self.recipe.refresh_dub_options())
         self.preview.b_mix.toggled.connect(self._mic)
         self.preview.b_mix.customContextMenuRequested.connect(self._mic_menu)
-        self.recipe.one.toggled.connect(lambda _v: self.editor._refill_later())     # the Voice column
+        self.recipe.one.currentIndexChanged.connect(lambda _i: self.editor._refill_later())     # the Voice column
         self.style.changed.connect(self._recipe_changed)
         self.style.area_requested.connect(self._ask_area)
         self.style.reset_requested.connect(self._box_reset)
@@ -613,6 +629,7 @@ class MainWindow(QMainWindow):
         if not v:
             off()
             return
+        self.recipe.voice_card.set_on(True)            # hearing the narration: Steps → Narration goes on too
         from ..steps import dub
         p = Project(v)
         if self.runner.busy:
@@ -655,6 +672,8 @@ class MainWindow(QMainWindow):
                 self._dubbing = video
             elif getattr(self, "_dubbing", None) == video:
                 self._dubbing = None
+                if video == self.queue.current():
+                    self.editor.refresh_marks()          # colour the lines read late
                 if state == "done" and video == self.queue.current():
                     pv = self.preview
                     if pv.live.on:
@@ -704,6 +723,22 @@ class MainWindow(QMainWindow):
         self._live_video = v
         self._run_videos, self._done_videos = [v], []
         self.runner.run_videos([v], None, force={"dub"}, title="Narration again", upto="live")
+
+    def remake_lines(self, starts):
+        """Right click on lines → Make the voice again: their clips are made fresh (an edited line is read with
+        its new text), then the whole narration is laid again (a shorter line moves the ones after it)."""
+        from ..steps import dub
+        v = self.queue.current()
+        if not v or not starts:
+            return
+        if self.runner.busy:
+            QMessageBox.information(self, APP_NAME, "Wait until the work running now is done (or stop it), then "
+                                    "make the voice again.")
+            return
+        self.editor._flush()
+        n = dub.forget_clips(Project(v), starts)
+        log.info("Voice made again for %d line(s) (%d saved clips dropped)", len(starts), n)
+        self.remake_narration()
 
     def _live_off(self):
         """Another video was opened: stop hearing (and lighting) the narration of the last one."""
@@ -819,7 +854,9 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 times = None
         self.editor.set_voice_times(times)
-        self.preview.set_cues(self.editor.shown_cues())
+        has_tr = any((c.text or "").strip() for c in self.editor.tr)
+        self.preview.set_cues(self.editor.shown_cues(
+            "translation" if self.preview.shows_translation() or not has_tr else "original"))
 
     def _current_region(self):
         v = self.queue.current()
@@ -858,6 +895,7 @@ class MainWindow(QMainWindow):
             p.meta["box_region"] = list(region)
             p.save()
         log.info("Subtitle area: %s", region)
+        self._touch(self._style_videos())
         self._recipe_changed()
 
     # ------------------------------------------------------------ one look for the whole project
@@ -922,6 +960,7 @@ class MainWindow(QMainWindow):
             p = Project(v)
             p.meta["box_region"] = area
             p.save()
+        self._touch(self._style_videos())
 
     def _box_reset(self):
         """Reset in Style: the box goes back on the area that was drawn (every video of the project)."""
@@ -929,6 +968,7 @@ class MainWindow(QMainWindow):
             p = Project(v)
             if p.meta.pop("box_region", None) is not None:
                 p.save()
+        self._touch(self._style_videos())
         self._recipe_changed()
 
     # ------------------------------------------------------------ the timeline
@@ -1069,19 +1109,11 @@ class MainWindow(QMainWindow):
         self.timeline.set_playhead(tl.to_timeline(i, t), follow=playing)
 
     def _tl_selected(self, sel):
-        """A line clicked on the timeline: the video goes to it and its words can be edited in Style (the look
-        is the project's: there is no look per line)."""
+        """A line clicked on the timeline: chosen, its words can be edited in Style. The video and the playhead
+        stay where they are (the playhead marks where the line is to be moved)."""
         if sel and sel[0] == "cue":
             _k, video, index = sel
             self._line_target = (video, index)
-            info = self.timeline.video(video)
-            start = next((a for (a, b, t, k) in info.cues if k == index), None)
-            if start is not None:                         # show that line on the video
-                tl = self.timeline.tl
-                ci = next((i for i, c in enumerate(tl.clips) if c["video"] == video and c["in"] <= start < c["out"]),
-                          -1)
-                if ci >= 0:
-                    self._tl_go(tl.to_timeline(ci, start + 0.05), play=False)
             self.style.set_line_mode(index + 1, None, self._line_texts(video, index))
         else:
             self._line_target = None
@@ -1135,23 +1167,60 @@ class MainWindow(QMainWindow):
         p = Project(video)
         return p, (p.src_srt if p.has(SRC_SRT) else None), (p.tr_srt if p.has(TR_SRT) else None)
 
-    def _tl_retimed(self, video, index, a, b):
-        """A line dragged on the timeline: new times in the original and the translation (same line)."""
+    def _tl_retimed(self, video, index, a, b, undoing=False):
+        """A line dragged on the timeline: new times in the original and the translation (same line). The open
+        video's line goes through the subtitle table (one Ctrl+Z history with the table's edits); another
+        video's is written here and kept by the timeline for Ctrl+Z."""
         from ..core.subtitle import load_srt, save_srt
+        ed = self.editor
+        if video == self.queue.current() and ed.project is not None and not undoing and 0 <= index < len(ed.src):
+            ed.retime(index, a, b)
+            self.timeline.reload_video(video)
+            return
         if video == self.queue.current():
-            self.editor._flush()
+            ed._flush()
         p, src, tr = self._srt_files(video)
+        before = None
         for path in (src, tr):                    # the original first: the translation stays the newer file
             if not path:
                 continue
             cues = load_srt(path)
             if 0 <= index < len(cues):
+                if before is None:
+                    before = (cues[index].start, cues[index].end)
                 cues[index].start, cues[index].end = a, b
                 save_srt(cues, path)
+        if before is not None and not undoing:
+            self.timeline.remember_cue(video, index, before, (a, b))
         self.timeline.reload_video(video)
         if video == self.queue.current():
-            self.editor.reload_keep_place()
+            ed.reload_keep_place()
             self._cues_to_preview()
+
+    def _undo(self):
+        """Ctrl+Z: with the timeline open, whichever came last (a timeline change or a subtitle edit)."""
+        tl, ed = self.timeline, self.editor
+        if not self.timeline_panel.isVisible():
+            ed.undo()
+            return
+        if ed.undo_stamp() > tl.undo_stamp():
+            if ed.undo() and ed.project is not None:
+                tl.reload_video(ed.project.video)
+        else:
+            tl.undo()
+        tl.refresh_history()
+
+    def _redo(self):
+        tl, ed = self.timeline, self.editor
+        if not self.timeline_panel.isVisible():
+            ed.redo()
+            return
+        if ed.redo_stamp() > tl.redo_stamp():
+            if ed.redo() and ed.project is not None:
+                tl.reload_video(ed.project.video)
+        else:
+            tl.redo()
+        tl.refresh_history()
 
     def _tl_edit_text(self, video, index):
         """Double-click on a line: its words, in Style, ready to type."""
@@ -1214,9 +1283,23 @@ class MainWindow(QMainWindow):
         p = Project(v)
         p.meta.pop("tr_edited", None)                   # the new translation replaces the edited one
         p.save()
+        if s["do_subtitles"] and s["subs_source"] != "ocr":
+            from ..steps import transcribe
+            transcribe.forget_words(p)                  # asked and confirmed: Whisper listens again from the start
         self.last_kind = "redo"
         self._run_videos, self._done_videos = [v], []
         self.runner.run_videos([v], steps, force=pipeline.RESUBS_FORCE, title="Subtitles again")
+
+    def _names_source(self):
+        """For "Find names in the subtitles": the lines of the video open in the table (None: none)."""
+        v = self.queue.current()
+        if not v or not self.editor.src:
+            return None
+        self.editor._flush()
+        src = [c.text for c in self.editor.src]
+        trl = [c.text for c in self.editor.tr] if len(self.editor.tr) == len(src) else None
+        lang = Project(v).meta.get("source_lang") or settings()["whisper_language"]
+        return src, trl, "" if lang == "auto" else lang, os.path.splitext(os.path.basename(v))[0]
 
     def _imported(self, video):
         if video == self.queue.current():
@@ -1281,11 +1364,39 @@ class MainWindow(QMainWindow):
                     self._busy_cursor = False
                     QApplication.restoreOverrideCursor()
             QTimer.singleShot(1200, done)
-        self.c_export.setEnabled(not busy)
-        self.c_run.setEnabled(not busy)
-        self._lock_right(busy)
+        self.c_export.setEnabled(True)                # while working: Export adds the videos to the run
+        self.c_run.setEnabled(True)
+        self._run_button(busy)
+        self._lock_right(False)                        # nothing is locked: each video keeps the settings it
+                                                       # started with (pipeline.frozen_settings), no notice
         self.recipe.set_busy(busy)
         self.batch.set_running(busy)
+
+    def _run_button(self, busy: bool):
+        """While working, Run is Stop."""
+        self.c_run.key = "stop" if busy else "play"
+        self.c_run.setText(tr("Stop") if busy else tr("Run"))
+        self.c_run.setToolTip(tr("Stop the work now") if busy else
+                              tr("Make everything switched on in Steps (subtitles, translation, narration) without "
+                                 "exporting: then look it over and edit it"))
+        self.c_run.refresh_icon()
+
+    def _run_or_stop(self):
+        if self.runner.busy:
+            self._stop_asked()
+        else:
+            self.run_kind("run")
+
+    def _stop_asked(self):
+        """Stop, after a Yes. Always asked (no "Don't ask again": a slip of the finger would throw away a long
+        run), No is the default."""
+        if not self.runner.busy:
+            return
+        if not confirm(self, tr("Stop the work now?\n(What is finished is kept: it goes on from there next time.)"),
+                       "", tr("Stop"), danger=True):
+            return
+        self._pending = None                          # stop means stop: nothing waiting starts after it
+        self.runner.stop()
 
     def _lock_right(self, on: bool):
         """Work running: Steps and Style (and dragging the lines / box on the video) are locked, so nothing
@@ -1293,11 +1404,11 @@ class MainWindow(QMainWindow):
         for i in range(self.inspector.count()):
             self.inspector.widget(i).setEnabled(not on)
         self.preview.view.locked = on
-        self.lock_note.setVisible(on)
 
-    def start(self, kind, videos=None, joined=False):
+    def start(self, kind, videos=None, joined=False, ask=True):
         """kind: 'export' = the whole recipe, 'subs' = only up to the translated .srt files. videos: the batch's
-        ticked videos (None = the videos selected in the list)."""
+        ticked videos (None = the videos selected in the list). While a run is going on, the videos are added
+        to it (same kind of run) or start right after it. ask=False: no Export window (making again)."""
         if not self.get_ffmpeg():
             return
         s = settings()
@@ -1314,7 +1425,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, APP_NAME, "Draw the subtitle area on the video first "
                                                         "(Subtitles → Select the subtitle area).")
                 return
-        if kind == "export":
+        if joined and self.runner.busy:
+            QMessageBox.information(self, APP_NAME, "Wait until the work running now is done (or stop it).")
+            return
+        if kind == "export" and not ask:
+            if s["export_target"] == "srt":
+                kind = "subs"
+        elif kind == "export":
             with wait_cursor():
                 dlg = ExportDialog(self, 1 if joined else len(videos))
             if joined:
@@ -1328,16 +1445,86 @@ class MainWindow(QMainWindow):
                 kind = "subs"
             self.recipe.refresh()
         self.editor._flush()
+        upto = {"subs": "translate", "run": "run"}.get(kind)
+        if self.runner.busy:                         # working: these join the run, or come right after it
+            self._add_to_run(kind, videos, upto)
+            return
         self.preview.pause()
         if s["do_voice"] and kind in ("export", "run"):
             self.preview.set_mix(None, [])           # let go of the mix files: the narration may write them
+        self._touched, self._run_results = {}, {}
         self.last_kind = kind
         self._run_videos, self._done_videos = list(videos), []
         self.batch.queued(videos)
         title = {"export": "Export", "run": "Run"}.get(kind, "Subtitles") + \
             (f" · {len(videos)} videos" if len(videos) > 1 else "")
-        upto = {"subs": "translate", "run": "run"}.get(kind)
         self.runner.run_videos(videos, None, title=title, upto=upto)
+
+    def _add_to_run(self, kind, videos, upto):
+        """Export / Run pressed while working: the videos are made after the ones already in the run (with the
+        settings as they are when their turn comes), or right after the run when it is another kind of work."""
+        if kind == self.last_kind and self.runner.enqueue(list(videos), upto):
+            self._run_videos = list(getattr(self, "_run_videos", [])) + list(videos)
+            self.batch.queued(videos)
+            self.progress.note(tr("Added to the run: {a}").replace("{a}", ", ".join(os.path.basename(v)
+                                                                                     for v in videos)))
+            return
+        old = self._pending
+        if old and old[0] == kind:
+            videos = old[1] + [v for v in videos if v not in old[1]]
+        self._pending = (kind, list(videos))
+        self.progress.note(tr("Starts when the work running now is done: {a}")
+                           .replace("{a}", ", ".join(os.path.basename(v) for v in videos)))
+
+    def _touch(self, videos):
+        """These videos were changed in the window (subtitles, box, area, own settings): if they were already
+        made (or are being made) in this run, the end of the run offers to make them again."""
+        import time
+        now = time.monotonic()
+        for v in videos:
+            if v:
+                self._touched[os.path.abspath(v)] = now
+
+    def _out_of_date(self):
+        """Videos of the run that was just made that started before a change (settings, look, subtitles)."""
+        started = dict(self.runner.started_at)
+        changed = settings().changed_at
+        out = []
+        for v, t in started.items():
+            if self._run_results.get(v) not in ("done", "failed"):
+                continue
+            if max(changed, self._touched.get(os.path.abspath(v), 0.0)) > t:
+                out.append(v)
+        return out
+
+    def _when_idle(self, fn, tries=0):
+        """Do fn once the work thread is gone ('finished' comes a moment before)."""
+        if self.runner.busy:
+            if tries < 50:
+                QTimer.singleShot(200, lambda: self._when_idle(fn, tries + 1))
+            return
+        fn()
+
+    def _after_run(self, result):
+        """The run is over: videos made before a change are offered to be made again, and videos asked for
+        meanwhile (another kind of work) start now."""
+        kind = self.last_kind
+        again = self._out_of_date() if result != "stopped" and kind in ("export", "run", "subs") else []
+        pending, self._pending = self._pending, None
+        if again:
+            names = "\n".join("• " + os.path.basename(v) for v in again[:8]) + ("\n…" if len(again) > 8 else "")
+            ask = tr("You changed things while working. Made before the change ({a}):\n{b}\n\nMake them "
+                     "again now? (Only what changed is made again.)").replace("{a}", str(len(again))).replace("{b}", names)
+            if confirm(self, ask, "redo_changed", tr("Make again")):
+                if pending and pending[0] == kind:
+                    again += [v for v in pending[1] if v not in again]
+                    pending = None
+                self._when_idle(lambda: self.start(kind, again, ask=False))
+                if pending:                          # another kind: after that
+                    self._pending = pending
+                return
+        if pending:
+            self._when_idle(lambda: self.start(pending[0], pending[1], ask=False))
 
     def download_model(self, name):
         self.runner.run_task(lambda c: models.download_whisper(name, c), f"Downloading Whisper {name}")
@@ -1376,7 +1563,11 @@ class MainWindow(QMainWindow):
     def on_video_finished(self, video, result):
         self.queue.update_item(video=video)
         if video == self.queue.current():
-            self.editor.load(video)
+            ep = self.editor.project
+            if ep is not None and ep.video == os.path.abspath(video):
+                self.editor.reload_keep_place()      # same row, scroll and Ctrl+Z as before the run
+            else:
+                self.editor.load(video)
             self._cues_to_preview()
             self._recipe_changed()
             live = self.last_kind == "dub" and video == getattr(self, "_live_video", None)
@@ -1416,7 +1607,38 @@ class MainWindow(QMainWindow):
         parents = {os.path.dirname(d) for d in dirs}
         open_folder(parents.pop() if len(parents) == 1 else sorted(dirs)[0])
 
+    def _rearm_mic(self, tries=0):
+        """A run is over and the mic is on: hear the narration again exactly as switching the mic off and on
+        does, with a new sound stream (after an export the old one could stay silent). Only when the narration
+        is made and up to date: nothing is made again by itself here."""
+        from ..steps import dub
+        pv = self.preview
+        if not pv.b_mix.isChecked():
+            return
+        if self.runner.busy:                      # 'finished' comes a moment before the work thread is gone
+            if tries < 25:
+                QTimer.singleShot(200, lambda: self._rearm_mic(tries + 1))
+            return
+        v = self.queue.current()
+        if not v:
+            return
+        p = Project(v)
+        log.info("Narration preview after the run: mix ready %s, on %s, live %s, sound %s, writing %s",
+                 pv.mix.ready(), pv.mix.on, pv.live.on, pv.engine.active(), getattr(self, "_writing", None) == v)
+        if getattr(self, "_writing", None) == v:
+            self._writing = None                  # the run is over: nothing is being written any more
+        if not (p.is_done("dub", dub.MIX) and dub.track_fresh(p)):
+            return
+        pv.live.stop()
+        pv.mix.set_enabled(False)
+        pv.engine.reset()
+        self._update_mix(v)                       # the files again (enabled: the mic is on)
+        if pv.mix.ready() and not pv.mix.on:
+            pv.mix.set_enabled(True)
+
     def on_finished(self, result, msg):
+        QTimer.singleShot(0, self._rearm_mic)
+        QTimer.singleShot(0, lambda: self._after_run(result))
         self._open_results()
         self._done_videos = []
         if self.pages.currentIndex() == 0:
@@ -1435,7 +1657,8 @@ class MainWindow(QMainWindow):
             if getattr(sys, "frozen", False):
                 self.get_ffmpeg()
             else:
-                self.progress.note("ffmpeg not found: run setup.bat, or set its folder in Settings.")
+                QMessageBox.warning(self, APP_NAME, tr("ffmpeg not found: run setup.bat, or set its folder in "
+                                                       "Settings."))
         self.recipe.set_gpu_text("Checking the graphics card…")
 
         def work():
@@ -1498,9 +1721,9 @@ class MainWindow(QMainWindow):
         sc(Qt.Key_W, lambda: tl.delete_side("right"), timeline=True)
         sc(Qt.Key_Delete, tl.delete_selected, lists_too=False, timeline=True)
         sc(Qt.Key_Backspace, tl.delete_selected, lists_too=False, timeline=True)
-        sc("Ctrl+Z", lambda: tl.undo() if self.timeline_panel.isVisible() else self.editor.undo())
-        sc("Ctrl+Shift+Z", lambda: tl.redo() if self.timeline_panel.isVisible() else self.editor.redo())
-        sc("Ctrl+Y", lambda: tl.redo() if self.timeline_panel.isVisible() else self.editor.redo())
+        sc("Ctrl+Z", self._undo)
+        sc("Ctrl+Shift+Z", self._redo)
+        sc("Ctrl+Y", self._redo)
         sc("Ctrl+=", lambda: tl.zoom(1.25), timeline=True)
         sc("Ctrl++", lambda: tl.zoom(1.25), timeline=True)
         sc("Ctrl+-", lambda: tl.zoom(1 / 1.25), timeline=True)
@@ -1620,7 +1843,7 @@ class MainWindow(QMainWindow):
             if self.runner.thread:
                 self.runner.thread.join(timeout=5)
         elif settings()["confirm_close"] and not getattr(self, "_restart", False):
-            box = QMessageBox(QMessageBox.Question, APP_NAME, "Close FreeSub?",
+            box = QMessageBox(QMessageBox.Question, APP_NAME, tr("Close FreeSub?"),
                               QMessageBox.Yes | QMessageBox.No, self)
             box.setDefaultButton(QMessageBox.No)
             again = QCheckBox("Don't ask again")

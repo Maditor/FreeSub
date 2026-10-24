@@ -66,6 +66,8 @@ class Gemini:
 
     def __init__(self):
         self._thinking = {}
+        self._no_safety = set()          # models that refuse the safety settings (a plain 400 "invalid argument")
+        self._refused = set()            # models that refused every way of asking (skipped until FreeSub restarts)
 
     def ready(self) -> bool:
         return bool(settings()["gemini_key"].strip())
@@ -76,7 +78,7 @@ class Gemini:
         if not key:
             raise KeyError_("Gemini: no API key (Settings → Translation)")
         first = s["gemini_model"] or GEMINI_MODELS[0]
-        models = [first] + [m for m in GEMINI_MODELS if m != first]
+        models = [m for m in [first] + [m for m in GEMINI_MODELS if m != first] if m not in self._refused] or [first]
         busy = net = 0
         while models:
             if control is not None:
@@ -86,10 +88,11 @@ class Gemini:
             gen = {"temperature": temperature, "maxOutputTokens": max_tokens}
             if THINKING[idx]:
                 gen["thinkingConfig"] = THINKING[idx]
-            body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": gen,
-                    "safetySettings": [{"category": c, "threshold": "BLOCK_NONE"} for c in (
-                        "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
-                        "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT")]}
+            body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": gen}
+            if model not in self._no_safety:
+                body["safetySettings"] = [{"category": c, "threshold": "BLOCK_NONE"} for c in (
+                    "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+                    "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT")]
             try:
                 r = requests.post(GEMINI_URL.format(model=model), json=body, timeout=120,
                                   headers={"x-goog-api-key": key})
@@ -105,6 +108,22 @@ class Gemini:
                 continue
             if r.status_code in (401, 403) or (r.status_code == 400 and "api key" in low):
                 raise KeyError_("Gemini: the API key was rejected")
+            if r.status_code == 400:
+                # "Request contains an invalid argument" says nothing about what: models accept different thinking
+                # knobs and safety settings. Try the other ways of asking, then the next model.
+                log.info("Gemini %s: HTTP 400 (%s) with thinking %s, safety %s", model, _detail(r)[:160],
+                         THINKING[idx], model not in self._no_safety)
+                if idx + 1 < len(THINKING):
+                    self._thinking[model] = idx + 1
+                    continue
+                if model not in self._no_safety:
+                    self._no_safety.add(model)
+                    self._thinking[model] = 0
+                    continue
+                self._refused.add(models.pop(0))
+                if not models:
+                    raise ServiceError(f"Gemini: HTTP 400 {_detail(r)[:120]}")
+                continue
             if r.status_code in (404, 429) or (r.status_code in (500, 502, 503, 504) and busy >= 1):
                 # model missing, out of quota or busy: free-tier limits are per model, try the next one
                 log.info("Gemini %s: HTTP %s, trying the next model", model, r.status_code)
@@ -128,6 +147,8 @@ class Gemini:
             parts = (cands[0].get("content") or {}).get("parts", [])
             out = _clean("".join(p.get("text", "") for p in parts if isinstance(p, dict) and not p.get("thought")))
             if out:
+                if model != s["gemini_model"]:
+                    settings().update(gemini_model=model)       # the model that answers is asked first next time
                 return out
             raise ServiceError(f"Gemini: empty answer ({cands[0].get('finishReason')})")
         raise QuotaError("Gemini: every model is out of quota or busy")

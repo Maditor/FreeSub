@@ -22,8 +22,6 @@ JOIN_GAP = 0.6        # lines further apart than this are never read together
 CONT_GAP = 0.35       # a sentence going on into the next line: joined when the gap is at most this
 JOIN_SPAN = 12.0      # a joined reading covers at most this many seconds
 JOIN_LINES = 3
-CATCH_UP = 1.5        # behind the picture by more than this: allow a little more speed
-CATCH_UP_SPEED = 0.15
 LOOK_AHEAD = 15.0     # seconds of talk looked at ahead ...
 BREATH = 1.0          # ... up to a pause this long, where the narration can catch up
 SENTENCE_END = (".", "!", "?", "…", "。", "！", "？", '"', "”", "»", ")", "]")
@@ -130,6 +128,13 @@ class Grouper:
         return u
 
 
+def run_on_limit(u: Unit, duration=0.0) -> float:
+    """The latest a reading may end: into the next line's time by MAX_DELAY at most (the next reading waits
+    that long). A reading that ends later than this did not fit even at the maximum speed: it is read late."""
+    hi1 = u.next_start + MAX_DELAY - PAUSE
+    return min(hi1, duration) if duration else hi1
+
+
 class Scheduler:
     """Places the readings one after another: (start, speed) for each, from its natural length."""
 
@@ -155,22 +160,20 @@ class Scheduler:
         lo = max(0.0, self.prev_end + PAUSE, u.start - LEAD)        # earliest start
         natural = max(u.start, self.prev_end + PAUSE)
         hi0 = u.next_start - PAUSE                                   # end without pushing the next reading
-        hi1 = u.next_start + MAX_DELAY - PAUSE                       # end when pushing it
-        if self.duration:
-            hi1 = min(hi1, self.duration)
-            hi0 = min(hi0, hi1)
+        hi1 = run_on_limit(u, self.duration)                          # end when pushing it
+        hi0 = min(hi0, hi1)
         if natural + length <= hi0:                                  # fits as it is
             return natural, 1.0
         room0 = hi0 - lo
         if room0 > 0 and length <= room0:                            # fits when started a little early
             return max(lo, min(natural, hi0 - length)), 1.0
-        if room0 > 0 and length / room0 <= 1.08:                     # a touch faster beats running late
+        if room0 > 0 and length / room0 <= min(1.08, self.max_speed):   # a touch faster beats running late
             return lo, length / room0
         room1 = hi1 - lo
         if room1 > 0 and length <= room1:                            # runs on, the next reading waits
             return lo, 1.0
-        cap = self.max_speed + (CATCH_UP_SPEED if lo - u.start > CATCH_UP else 0.0)
-        speed = min(cap, length / room1) if room1 > 0 else cap
+        # the maximum speed is a ceiling: when it is not enough the reading runs late (and the next ones wait)
+        speed = min(self.max_speed, length / room1) if room1 > 0 else self.max_speed
         return lo, max(1.0, speed)
 
     def ended(self, end: float):

@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QListView, QListW
 from ..config import settings
 from ..core import ffmpeg
 from ..core.project import Project
-from ..core.subtitle import fmt_clock
 from . import icons, theme
 from .widgets import IconButton, hline, label, row, wait_cursor
 
@@ -125,10 +124,21 @@ class _MediaList(QListWidget):
 
     def mouseReleaseEvent(self, e):
         if self._band is not None:
-            _start, band, _before = self._band
+            start, band, before = self._band
             band.hide()
             band.deleteLater()
             self._band = None
+            from PySide6.QtWidgets import QApplication
+            moved = (e.position().toPoint() - start).manhattanLength() >= QApplication.startDragDistance()
+            it = self.itemAt(start)
+            if not moved and it is not None:          # a click beside a name (no frame drawn): that video
+                if e.modifiers() & Qt.ControlModifier:
+                    it.setSelected(self.row(it) not in before)
+                    self.setCurrentItem(it, QItemSelectionModel.NoUpdate)
+                else:
+                    self.setCurrentItem(it)            # chosen (and shown) like a click on its name
+                e.accept()
+                return
             sel = self.selectedItems()
             if sel and self.currentItem() not in sel:     # the player shows one of them
                 self.setCurrentItem(sel[0], QItemSelectionModel.NoUpdate)
@@ -274,7 +284,6 @@ class Queue(QWidget):
         self.view = ""
         self.list.viewport().installEventFilter(self)
         self.empty = label("Drop videos or folders here.", muted=True, wrap=True)
-        self.info = label("", muted=True, wrap=True)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
@@ -282,14 +291,12 @@ class Queue(QWidget):
         lay.addWidget(hline())
         lay.addWidget(self.list, 1)
         lay.addWidget(self.empty)
-        lay.addWidget(self.info)
         self.b_remove.clicked.connect(self.remove_selected)
         self.list.moved.connect(self._moved)
         self.list.files_dropped.connect(self.add_paths)
         self.list.currentItemChanged.connect(self._current)
         self.list.customContextMenuRequested.connect(self._menu)
         self.set_view(settings()["queue_view"] if settings()["queue_view"] in ("list", "grid") else "list")
-        self._refresh_info()
 
     # ------------------------------------------------------------ list / grid
     def set_view(self, view):
@@ -448,8 +455,6 @@ class Queue(QWidget):
             it.setIcon(QIcon())
             it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             it.setToolTip(v)
-        if v == self.current():
-            self._refresh_info()
 
     def update_all(self):
         for i in range(self.list.count()):
@@ -498,22 +503,7 @@ class Queue(QWidget):
         return self.infos[video]
 
     def _current(self, cur, _prev):
-        self._refresh_info()
         self.current_changed.emit(cur.data(Qt.UserRole) if cur else "")
-
-    def _refresh_info(self):
-        v = self.current()
-        if not v:
-            self.info.setText("")
-            return
-        inf = self.info_for(v)
-        if inf.get("error"):
-            self.info.setText(inf["error"])
-            return
-        parts = [fmt_clock(inf["duration"]).split(".")[0]]
-        if inf.get("has_video"):
-            parts.append(f"{inf['width']} x {inf['height']}")
-        self.info.setText(" · ".join(parts))
 
     def _menu(self, pos):
         it = self.list.itemAt(pos)

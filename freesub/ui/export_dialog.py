@@ -4,7 +4,7 @@ video / one .srt); on the Batch page, each ticked video."""
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QVBoxLayout, QWidget
 
 from ..config import settings
-from .widgets import Segmented, form_row, label
+from .widgets import Segmented, form_row, label, tick_row
 
 
 def _combo(items, value):
@@ -48,7 +48,7 @@ class ExportDialog(QDialog):
         lay.addWidget(label("Export", muted=True))
         lay.addWidget(self.target)
         lay.addWidget(self.video_box)
-        lay.addWidget(self.open_after)
+        lay.addWidget(tick_row(self.open_after))
         lay.addSpacing(4)
         lay.addWidget(bb)
         self.target.changed.connect(lambda _v: self._show())

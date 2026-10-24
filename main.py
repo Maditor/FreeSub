@@ -123,10 +123,19 @@ def _splash(app):
 
 
 def main():
+    if sys.stdout is None or sys.stderr is None:      # run.bat starts pythonw (no console window)
+        try:
+            from freesub import log as _log
+            _log.no_console_output()
+        except Exception:  # noqa: BLE001
+            pass
     if len(sys.argv) == 3 and sys.argv[1] == "--list-gpus":        # child process of core.dxgi
         from freesub.core import dxgi
         dxgi.write_listing(sys.argv[2])
         return
+    if len(sys.argv) == 3 and sys.argv[1] == "--separate":         # child process of steps.separate
+        from freesub.steps import separate
+        sys.exit(separate.child_main(sys.argv[2]))
     ap = argparse.ArgumentParser(prog="FreeSub")
     ap.add_argument("--cli", choices=["export"], help="run the saved recipe (the Export button) without a window")
     ap.add_argument("--redo", action="store_true", help="redo steps that are already done")

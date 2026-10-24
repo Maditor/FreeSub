@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 APP_NAME = "FreeSub"
 
@@ -101,7 +102,7 @@ DEFAULTS = {
     "last_open_dir": "",
     "log_open": False,
     # speech -> subtitles (faster-whisper)
-    "whisper_quality": "balanced",  # fast | balanced | best | custom
+    "whisper_quality": "balanced",  # (old: Steps now picks the model itself, whisper_model)
     "whisper_separate": False,      # separate the voice from music / effects before Whisper
     "whisper_model": "large-v3-turbo",
     "whisper_language": "auto",
@@ -161,12 +162,16 @@ DEFAULTS = {
     "tts_speed": 100,
     "tts_respell": True,
     "dub_max_speedup": 1.5,         # (old, not used any more)
-    "dub_max_speed": 1.25,          # narration: never read faster than this (timing.py moves lines first)
-    "dub_join": True,
+    "dub_max_speed": 1.25,          # (old: a factor, replaced by dub_max_pct)
+    "dub_max_pct": 125,             # narration: never read faster than this, in % of normal speed (like tts_speed);
+                                    # timing.py moves lines first, only then reads faster
+    "dub_join": True,               # (old: now follows dub_auto)
+    "dub_auto": True,               # narration: speed between tts_speed and dub_max_pct, short lines joined and the
+                                    # subtitles follow the reading; off: every line at tts_speed, nothing joined
     "parallel_videos": "auto",      # batch: videos worked on at the same time: auto | 1 | 2
     "auto_fit_lines": True,         # new subtitles: lines broken once to fit the box / video (like the button)
     "voice_mode": "one",            # narration: one voice for every line | split (women / men, beta)
-    "dub_sync_subs": True,          # narration on: the subtitles follow the times the lines are read at               # narration: read short lines that belong together as one sentence
+    "dub_sync_subs": True,          # narration on: the subtitles follow the times the lines are read at
     "dub_volume": 100,              # %
     "dub_bg_volume": 100,           # % music and effects (or the whole original sound without separation)
     "dub_voice_volume": 100,        # % the original voice (needs voice separation)
@@ -195,6 +200,7 @@ DEFAULTS = {
     # preview
     "preview_volume": 80,
     "preview_show_subs": True,
+    "preview_translation": True,    # the video shows the translation (False: the original, to compare)
 }
 
 
@@ -214,6 +220,8 @@ class Settings:
         self._lock = threading.Lock()
         self._tl = threading.local()          # per-thread overlay: one video's own settings while it runs
         self.ui_style = {}                    # the window's video's own style (read on the window's thread)
+        self.changed_at = 0.0                 # time.monotonic() of the last change that changes what is made
+        self.on_change = None                 # the window: told (keys) after a change made on its thread
         self.style_sink = None                # the window: where a style change of that video goes
         self.load()
 
@@ -223,6 +231,12 @@ class Settings:
                 saved = json.load(f)
             if isinstance(saved, dict):
                 self.data.update({k: v for k, v in saved.items()})
+                if "dub_max_pct" not in saved and "dub_max_speed" in saved:    # the old factor -> a % (nearest 5)
+                    try:
+                        pct = float(self.data["tts_speed"]) * float(saved["dub_max_speed"])
+                        self.data["dub_max_pct"] = int(max(50, min(200, round(pct / 5) * 5)))
+                    except (TypeError, ValueError):
+                        pass
         except (OSError, ValueError):
             pass
 
@@ -262,14 +276,45 @@ class Settings:
         finally:
             self._tl.over = prev
 
+    def snapshot(self) -> dict:
+        """All the shared settings as they are now (a copy): a video is made with these from start to end."""
+        import copy
+        with self._lock:
+            return copy.deepcopy(dict(DEFAULTS, **self.data))
+
+    def current_overlay(self):
+        """This thread's overlay (for a helper thread that works for the same video)."""
+        return getattr(self._tl, "over", None)
+
+    def adopt(self, over):
+        """A helper thread (e.g. the narration's voice makers) uses the overlay of the thread it works for."""
+        self._tl.over = dict(over) if over else None
+
     def update(self, **kw):
+        main = threading.current_thread() is threading.main_thread()
+        if main:
+            changed = [k for k, v in kw.items() if self.get(k) != v or self.data.get(k) != v]
+        over = getattr(self._tl, "over", None)
+        if over:                                   # a running video changes a value: it sees it too
+            for k in kw:
+                if k in over:
+                    over[k] = kw[k]
         style = {k: v for k, v in kw.items() if k in STYLE_KEYS}
         if style and self.style_sink is not None and threading.current_thread() is threading.main_thread():
             if self.style_sink(style):            # kept by the video (not the shared settings)
                 kw = {k: v for k, v in kw.items() if k not in STYLE_KEYS}
         if kw:
-            self.data.update(kw)
+            with self._lock:
+                self.data.update(kw)
             self.save()
+        if main and changed:
+            if set(changed) - UI_KEYS:
+                self.changed_at = time.monotonic()
+            if self.on_change is not None:
+                try:
+                    self.on_change(changed)
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 # How the subtitles look: each video keeps its own (project.json "style"); the shared values are what a video
@@ -277,6 +322,13 @@ class Settings:
 STYLE_KEYS = ("sub_font", "sub_size", "sub_bold", "sub_color", "sub_outline_size", "sub_outline", "sub_margin",
               "sub_pos_x", "sub_max_words", "sub_max_lines", "sub_max_duration", "sub_box", "sub_box_always",
               "sub_box_color", "ocr_box_opacity", "ocr_box_blur", "video_speed")
+
+# Settings that do not change what is made (the window, questions, keys, preview): changing them while videos
+# are being made does not make those videos out of date.
+UI_KEYS = frozenset({"confirm_close", "confirm_skip", "language", "last_open_dir", "log_open", "native_titlebar",
+                     "open_folder_after", "parallel_videos", "preview_show_subs", "preview_translation", "preview_volume", "queue_view",
+                     "theme", "window_geometry", "window_state", "tts_test_text", "gemini_key", "cloudflare_token",
+                     "cloudflare_account", "video_speed", "ffmpeg_path"})
 
 SETTINGS = None
 

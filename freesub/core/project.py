@@ -284,6 +284,33 @@ class Project:
                        creationflags=0x08000000 if os.name == "nt" else 0)
         return self.thumb if self.has("thumb.jpg") else None
 
+    def strip_state(self) -> dict | None:
+        """The timeline's film strip made so far (see core/filmstrip): {step, count, done, pictures}."""
+        from . import filmstrip
+        return filmstrip.state(self.folder)
+
+    def make_strip(self) -> dict | None:
+        """Make (or finish) the timeline's film strip; run it in a thread. Returns strip_state()."""
+        st = self.strip_state()
+        if st and st["done"]:
+            return st
+        if not os.path.isfile(self.video):
+            return None
+        from . import ffmpeg, filmstrip
+        exe = ffmpeg.find("ffmpeg")
+        if not exe:
+            return None
+        dur = (self.meta.get("info") or {}).get("duration") or 0
+        if not dur:
+            try:
+                dur = ffmpeg.probe(self.video).get("duration") or 0
+            except Exception:  # noqa: BLE001
+                return None
+        if dur <= 0:
+            return None
+        self.ensure()
+        return filmstrip.make(self.folder, self.video, dur, exe)
+
     # ------------------------------------------------------------- cut
     @property
     def cut(self):
@@ -382,7 +409,7 @@ def list_projects() -> list[dict]:
 
 
 # files that only depend on the video itself (not on the work done): they may stay
-_SAFE_LEFT = {"thumb.jpg", "preview.mp4", "preview.done"}
+_SAFE_LEFT = {"thumb.jpg", "preview.mp4", "preview.done", "strip", "strip.json"}
 
 
 def _rmtree(path: str, tries: int = 6) -> bool:

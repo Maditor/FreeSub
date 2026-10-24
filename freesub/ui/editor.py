@@ -1,20 +1,21 @@
 """Subtitle table under the preview: time, original, translation. Edit a cell to fix a line; changes are saved
-to the project (and the .srt in the output folder) a moment later. Click a line to jump the video there."""
+to the project (and the .srt in the output folder) a moment later. Click a line to choose it; double-click its words
+to jump the video there and edit them (double-click a time: edit it, the video stays)."""
 import logging
 import os
-
 import threading
+import time
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from ..i18n import tr
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem, QVBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHeaderView, QTableWidget, QTableWidgetItem, QVBoxLayout,
                                QWidget)
 
 from ..core import find as fnd
 from ..core.project import SRC_SRT, TR_SRT, Project
-from ..core.subtitle import Cue, cue_at, fmt_clock, load_srt, parse_time, save_srt
+from ..core.subtitle import Cue, cue_at, fmt_clock, load_srt, parse_time, save_srt, slot_between
 from .find_bar import FindBar, FindDelegate
 from .queue import open_folder
 from .widgets import IconButton, confirm, label, row, section, wait_cursor
@@ -45,6 +46,7 @@ class Editor(QWidget):
     cues_changed = Signal()
     redo_requested = Signal()              # make the subtitles again with the Steps settings
     import_requested = Signal(str)         # "original" | "translation"
+    remake_voice = Signal(list)            # start times of the lines whose voice is made again (right click)
 
     def __init__(self):
         super().__init__()
@@ -73,6 +75,7 @@ class Editor(QWidget):
         h.setSectionResizeMode(C_SRC, QHeaderView.Stretch)
         h.setSectionResizeMode(C_TR, QHeaderView.Stretch)
         self.voices = []                   # [(gender, how)] per row: how = you | learned | auto
+        self.marks = {}                    # what the last narration found per line (dub.line_marks): read late?
         self._vsig = _VoiceSignal()
         self._vsig.done.connect(self._voices_done)
         self._learning = False
@@ -93,8 +96,7 @@ class Editor(QWidget):
         self.find.hide()
         self._find_hits, self._find_at = [], -1           # the matches (core/find.py) and the current one
         self._find_delegate = FindDelegate(self.table)
-        self.table.setItemDelegateForColumn(C_SRC, self._find_delegate)
-        self.table.setItemDelegateForColumn(C_TR, self._find_delegate)
+        self.table.setItemDelegate(self._find_delegate)          # every column: it also paints the row colours
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
@@ -115,9 +117,12 @@ class Editor(QWidget):
         self.filler = QWidget()          # takes the room of the table while there is none: the header stays on top
         lay.addWidget(self.filler, 1)
         self.table.cellClicked.connect(self._clicked)
+        self.table.cellDoubleClicked.connect(self._double_clicked)
         self.table.itemChanged.connect(self._edited)
         self.b_open.clicked.connect(self.open_output)
         self.b_fit.clicked.connect(self.fit_lines)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)       # right click: delete / add a line
+        self.table.customContextMenuRequested.connect(self._row_menu)
         self.b_find.toggled.connect(self.show_find)
         self.find.changed.connect(self._find_changed)
         self.find.step.connect(self._find_step)
@@ -163,6 +168,13 @@ class Editor(QWidget):
         if changed and on:
             self._refill_later()
 
+    def sync_voice_button(self):
+        """'Subtitles follow the narration' was switched in the narration card: the headset button follows."""
+        from ..config import settings
+        on = bool(settings()["dub_sync_subs"])
+        if self.b_voice.isChecked() != on:
+            self.b_voice.setChecked(on)                  # -> _voice_toggled: table, tip, preview
+
     def _voice_tip(self):
         self.b_voice.setEnabled(bool(self.voice_times))      # nothing to switch to before the narration exists
         if not self.voice_times:
@@ -207,7 +219,9 @@ class Editor(QWidget):
         if getattr(self, "_fit_job", None):              # lines being fitted: keep what is done so far
             self._save()
         self._flush()
-        self._undo, self._redo = [], []                  # undo is for this video's lines
+        same = bool(video) and self.project is not None and self.project.video == os.path.abspath(video)
+        if not (same and hasattr(self, "_undo")):
+            self._undo, self._redo = [], []              # undo is for this video's lines (kept on a reload)
         self.project = Project(video) if video else None
         self.src = load_srt(self.project.src_srt) if self.project and self.project.has(SRC_SRT) else []
         tr = load_srt(self.project.tr_srt) if self.project and self.project.has(TR_SRT) else []
@@ -216,6 +230,7 @@ class Editor(QWidget):
             tr = [starts.get(round(c.start, 1), Cue(c.start, c.end, "")) for c in self.src]
         self.tr = tr
         self._read_voices()
+        self._read_marks()
         self._fill()
 
     def reload_keep_place(self):
@@ -257,10 +272,13 @@ class Editor(QWidget):
                     else:
                         it.setForeground(self.palette().placeholderText())
                 self.table.setItem(i, col, it)
+            if self.marks:
+                self._paint_mark(i)
         self.table.blockSignals(False)
         self.table.setUpdatesEnabled(True)
         n = len(self.src)
         self.count.setText(f"{n} line{'s' if n != 1 else ''}" + (" · translated" if any(c.text for c in self.tr) else ""))
+        self._count_marks()
         self.table.setVisible(n > 0)
         self.filler.setVisible(n == 0)
         self.hint.setVisible(n == 0 and self.project is not None)
@@ -306,12 +324,17 @@ class Editor(QWidget):
 
     # ------------------------------------------------------------ edits
     def _clicked(self, r, c):
+        """One click only chooses the line (the video stays where it is); the voice cell switches the voice."""
         if r >= len(self.src):
             return
         if c == C_VOICE:
             self._cycle_voice(r)
-            return
-        self.seek.emit(self._time(r)[0] + 0.01)
+
+    def _double_clicked(self, r, c):
+        """Double-click on the words: the video goes to the line, and the words open for editing. On a time:
+        only the time opens (the video stays, to read the time to type from it)."""
+        if r < len(self.src) and c in (C_SRC, C_TR):
+            self.seek.emit(self._time(r)[0] + 0.01)
 
     # ------------------------------------------------------------ women's / men's voice
     def _read_voices(self):
@@ -405,9 +428,44 @@ class Editor(QWidget):
         """Before a change: the lines as they are now can be brought back."""
         if not hasattr(self, "_undo"):
             self._undo, self._redo = [], []
-        self._undo.append((label, self._snap()))
+        self._undo.append((label, self._snap(), time.monotonic()))
         del self._undo[:-100]
         self._redo.clear()
+
+    def undo_stamp(self) -> float:
+        """When the change Ctrl+Z would undo was made (-1: nothing to undo); the timeline compares it with its
+        own, so Ctrl+Z undoes whichever came last."""
+        u = getattr(self, "_undo", None)
+        return u[-1][2] if u and not getattr(self, "_fit_job", None) else -1.0
+
+    def redo_stamp(self) -> float:
+        r = getattr(self, "_redo", None)
+        return r[-1][2] if r and not getattr(self, "_fit_job", None) else -1.0
+
+    def retime(self, i: int, a: float, b: float):
+        """A line dragged on the timeline (this video): new times, which Ctrl+Z brings back like any edit."""
+        if not (0 <= i < len(self.src)):
+            return
+        self._remember("timing")
+        cue = self.src[i]
+        if abs(cue.start - a) > 1e-6:
+            from ..steps import genders
+            genders.move_mark(self.project, cue.start, a)              # a voice mark follows its line
+        cue.start, cue.end = a, b
+        if i < len(self.tr):
+            self.tr[i].start, self.tr[i].end = a, b
+        self._dirty.update({"src", "tr"} if self.tr else {"src"})
+        self._hl = None
+        ta, tb = self._time(i)
+        self.table.blockSignals(True)
+        for col, v in ((0, ta), (1, tb)):
+            it = self.table.item(i, col)
+            if it is not None:
+                it.setText(fmt_clock(v))
+        self.table.blockSignals(False)
+        self._save_timer.stop()
+        self._save()                                  # written now: the timeline reads the file
+        self.cues_changed.emit()
 
     def _restore(self, snap):
         src, tr_ = snap
@@ -427,8 +485,8 @@ class Editor(QWidget):
     def undo(self) -> bool:
         if getattr(self, "_fit_job", None) or not getattr(self, "_undo", None):
             return False
-        label, snap = self._undo.pop()
-        self._redo.append((label, self._snap()))
+        label, snap, _at = self._undo.pop()
+        self._redo.append((label, self._snap(), time.monotonic()))
         self._restore(snap)
         self.count.setText(self.count.text() + tr(" · undone: {a}").replace("{a}", tr(label)))
         return True
@@ -436,8 +494,8 @@ class Editor(QWidget):
     def redo(self) -> bool:
         if getattr(self, "_fit_job", None) or not getattr(self, "_redo", None):
             return False
-        label, snap = self._redo.pop()
-        self._undo.append((label, self._snap()))
+        label, snap, _at = self._redo.pop()
+        self._undo.append((label, self._snap(), time.monotonic()))
         self._restore(snap)
         self.count.setText(self.count.text() + tr(" · redone: {a}").replace("{a}", tr(label)))
         return True
@@ -472,9 +530,216 @@ class Editor(QWidget):
         except (ValueError, IndexError):
             self._fill()
             return
+        if self.marks and c in (C_SRC, C_TR):           # read late -> edited: the colour changes at once
+            self.table.blockSignals(True)
+            self._paint_mark(r)
+            self.table.blockSignals(False)
+            self._count_marks()
         self._save_timer.start()
         self.cues_changed.emit()
         self._find_refresh()
+
+    # ------------------------------------------------------------ lines read late by the narration
+    def _read_marks(self):
+        from ..steps import dub
+        self.marks = dub.line_marks(self.project) if self.project and self.src else {}
+
+    def refresh_marks(self):
+        """A narration was just made: colour the lines that were read late (and only those)."""
+        if self.project is None:
+            return
+        self._read_marks()
+        self._refill_later()
+
+    def _said_text(self, i) -> str:
+        """The text of row i that the narration reads (the translation when there is one)."""
+        if self.tr:
+            return self.tr[i].text if i < len(self.tr) else ""
+        return self.src[i].text
+
+    def line_mark(self, i):
+        """'late' (read past its time even at the maximum speed), 'edited' (was late, its text changed since:
+        make the voice again to see), or None; with what the narration found."""
+        m = self.marks.get(round(self.src[i].start, 1)) if i < len(self.src) else None
+        if not m or not m.get("over"):
+            return None, m
+        if " ".join(m.get("t", "").split()) != " ".join(self._said_text(i).split()):
+            return "edited", m
+        return "late", m
+
+    def _paint_mark(self, i):
+        from . import theme
+        kind, m = self.line_mark(i)
+        if kind:
+            back = QColor(theme.colors()["err" if kind == "late" else "warn"])
+            back.setAlpha(60 if kind == "late" else 38)
+            if kind == "late":
+                tip = tr("{a} s late").replace("{a}", f"{m['over']:.1f}")
+            else:
+                tip = tr("Edited, voice not made again yet")
+        for col in range(self.table.columnCount()):
+            it = self.table.item(i, col)
+            if it is None:
+                continue
+            if kind:
+                it.setBackground(back)
+            else:
+                it.setData(Qt.BackgroundRole, None)
+            if col == (C_TR if self.tr else C_SRC):
+                it.setToolTip(tip if kind else "")
+
+    def edited_rows(self):
+        """Lines whose spoken text is not what the last narration read (changed, or added since). None before
+        a narration was made."""
+        if not self.marks:
+            return []
+        out = []
+        for i, c in enumerate(self.src):
+            said = " ".join(self._said_text(i).split())
+            m = self.marks.get(round(c.start, 1))
+            if said and (not m or " ".join(m.get("t", "").split()) != said):
+                out.append(i)
+        return out
+
+    def late_rows(self):
+        return [i for i in range(len(self.src)) if self.line_mark(i)[0] == "late"]
+
+    def _count_marks(self):
+        """'· 3 read late' after the line count (the tooltip says what to do)."""
+        text = self.count.text().split(" · ")
+        late_word = tr("{a} read late").split("{a}")[-1]
+        text = [x for x in text if not x.endswith(late_word)]
+        n = len(self.late_rows()) if self.marks else 0
+        if n:
+            text.append(tr("{a} read late").replace("{a}", str(n)))
+        self.count.setText(" · ".join(text))
+        self.count.setToolTip(tr("Too long even at the maximum speed") if n else "")
+
+    # ------------------------------------------------------------ delete / add a line (right click)
+    def _lines_blocked(self) -> str:
+        """Why lines can not be added or deleted right now ('' = they can)."""
+        if getattr(self, "_fit_job", None):
+            return tr("Wait: the lines are being fitted")
+        return ""
+
+    def _row_menu(self, pos):
+        r = self.table.rowAt(pos.y())
+        if not 0 <= r < len(self.src):
+            return
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if r not in rows:                        # right click on a line outside the selection: that line only
+            rows = [r]
+            self.table.blockSignals(True)
+            self.table.selectRow(r)
+            self.table.blockSignals(False)
+        self._build_row_menu(r, rows).exec(self.table.viewport().mapToGlobal(pos))
+
+    def _build_row_menu(self, r: int, rows):
+        from PySide6.QtWidgets import QMenu
+        m = QMenu(self)
+        m.setToolTipsVisible(True)
+        acts = [m.addAction("Delete line" if len(rows) == 1 else tr("Delete {a} lines").replace("{a}", str(len(rows))),
+                            lambda: self.delete_lines(rows))]
+        m.addSeparator()
+        acts.append(m.addAction("Add line above", lambda: self.add_line(r, above=True)))
+        acts.append(m.addAction("Add line below", lambda: self.add_line(r, above=False)))
+        m.addSeparator()
+        starts = [self.src[i].start for i in rows if 0 <= i < len(self.src)]
+        edited = self.edited_rows()
+        sub = m.addMenu("Make the voice again")
+        sub.setToolTipsVisible(True)
+        a_sel = sub.addAction(tr("Selected lines ({a})").replace("{a}", str(len(rows))),
+                              lambda: self.remake_voice.emit(starts))
+        a_sel.setToolTip("Read these lines again, then play")
+        a_ed = sub.addAction(tr("All edited lines ({a})").replace("{a}", str(len(edited))),
+                             lambda: self.remake_voice.emit([self.src[i].start for i in self.edited_rows()]))
+        a_ed.setToolTip("Lines changed since the last narration")
+        a_ed.setEnabled(bool(edited))
+        v = sub.menuAction()
+        acts.append(v)
+        why = self._lines_blocked()
+        if why:
+            for a in acts:
+                a.setEnabled(False)
+                a.setToolTip(why)
+        elif self.project is None:
+            v.setEnabled(False)
+        return m
+
+    def _commit_edit(self):
+        """A cell still being typed in is closed first (what was typed is kept): the table is filled again."""
+        if self.table.state() == QAbstractItemView.EditingState:
+            w = QApplication.focusWidget()
+            if w is not None:
+                w.clearFocus()
+
+    def _lines_changed(self, select: int, seek: bool = False, edit: bool = False):
+        """The list of lines changed (a line added or deleted): show it, save it, tell the others.
+        The narration was made for the old lines (its times are counted by line number): it is out of date now
+        and has to be made again, so the table goes back to the lines' own times at once. It is saved before the
+        others are told, so that nobody reads the old narration times against the new line numbers."""
+        self.voice_times = None
+        self._voice_tip()
+        self._dirty.update({"src", "tr"} if self.tr else {"src"})
+        bar = self.table.verticalScrollBar().value()
+        self._read_voices()                      # voice marks follow a line by its start time, so they stay right
+        self._fill()
+        self.table.verticalScrollBar().setValue(bar)
+        n = self.table.rowCount()
+        if n:
+            r = max(0, min(select, n - 1))
+            self.table.blockSignals(True)
+            self.table.setCurrentCell(r, C_SRC)
+            self.table.blockSignals(False)
+            self.table.scrollToItem(self.table.item(r, C_SRC))
+            if seek:
+                self.seek.emit(self._time(r)[0] + 0.01)
+            if edit:                             # the new line is empty: type its text straight away
+                def start_edit():                # (if a click or an undo came first, nothing to open any more)
+                    it = self.table.item(r, C_SRC)
+                    if it is not None and self.table.currentRow() == r:
+                        self.table.editItem(it)
+                QTimer.singleShot(0, start_edit)
+        self._save()
+        self.cues_changed.emit()
+
+    def add_line(self, r: int, above: bool = True):
+        """An empty line above / below line r. Its time is a short slot in the gap between the two lines."""
+        if self._lines_blocked() or not 0 <= r < len(self.src):
+            return
+        self._commit_edit()
+        k = r if above else r + 1
+        a, b = slot_between(self.src[k - 1] if k > 0 else None, self.src[k] if k < len(self.src) else None)
+        self._remember("add line")
+        self.src.insert(k, Cue(a, b, ""))
+        if self.tr:
+            while len(self.tr) < len(self.src) - 1:
+                s = self.src[len(self.tr)]
+                self.tr.append(Cue(s.start, s.end, ""))
+            self.tr.insert(k, Cue(a, b, ""))
+        self._lines_changed(k, seek=True, edit=True)
+
+    def delete_lines(self, rows):
+        rows = sorted({r for r in rows if 0 <= r < len(self.src)})
+        if not rows or self._lines_blocked():
+            return
+        self._commit_edit()
+        if len(rows) == 1:
+            r = rows[0]
+            text = self._short(self.src[r].text or (self.tr[r].text if r < len(self.tr) else ""))
+            ask = (tr("Delete line {a}?\n“{b}”\n(Ctrl+Z brings it back.)").replace("{b}", text) if text
+                   else tr("Delete line {a}?\n(Ctrl+Z brings it back.)")).replace("{a}", str(r + 1))
+        else:
+            ask = tr("Delete {a} lines?\n(Ctrl+Z brings them back.)").replace("{a}", str(len(rows)))
+        if not confirm(self, ask, "line_delete", "Delete", danger=True):
+            return
+        self._remember("delete line")
+        gone = set(rows)
+        keep = [i for i in range(len(self.src)) if i not in gone]
+        self.src = [self.src[i] for i in keep]
+        if self.tr:
+            self.tr = [self.tr[i] for i in keep if i < len(self.tr)]
+        self._lines_changed(rows[0])
 
     # ------------------------------------------------------------ find and replace
     def open_find(self) -> bool:
@@ -615,9 +880,9 @@ class Editor(QWidget):
             return
         self._remember("find and replace")                # one Ctrl+Z brings all of it back
         with wait_cursor():
-            for (row, kind), spans in by.items():
-                cue = (self.src if kind == fnd.SRC else self.tr)[row]
-                self._find_put(row, kind, fnd.replace_in_text(cue.text, spans, repl))
+            for (r, kind), spans in by.items():
+                cue = (self.src if kind == fnd.SRC else self.tr)[r]
+                self._find_put(r, kind, fnd.replace_in_text(cue.text, spans, repl))
         self._find_touched({kind for _row, kind in by})
         self._find_refresh(anchor=(0, 0, 0, 0))
         self.find.flash(tr("{a} replaced").replace("{a}", str(n)))

@@ -1,5 +1,7 @@
 """Video preview: Qt Multimedia player in a zoomable graphics view, with the subtitle drawn on top."""
+import logging
 import os
+import time
 
 from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
@@ -15,6 +17,8 @@ from ..core.style import box_look, sub_style
 from ..core.subtitle import cue_at, fmt_clock
 from . import theme
 from .widgets import IconButton
+
+log = logging.getLogger(__name__)
 
 
 class Timeline(QSlider):
@@ -486,6 +490,7 @@ class VideoView(QGraphicsView):
 class Preview(QWidget):
     end_reached = Signal()                 # played to the end of what the file has (a growing preview copy)
     position_changed = Signal(float)       # seconds
+    which_changed = Signal()               # translation / original shown on the video (the tr button)
     region_selected = Signal(list)         # [x, y, w, h] fractions of the picture
     box_moved = Signal(list)               # the box dragged somewhere else: [x, y, w, h] fractions
     style_moved = Signal()                 # the lines dragged (sub_pos_x / sub_margin changed)
@@ -533,6 +538,9 @@ class Preview(QWidget):
         self.time.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.b_cc = IconButton("cc", "Show subtitles on the video", checkable=True)
         self.b_cc.setChecked(bool(settings()["preview_show_subs"]))
+        self.b_tr = IconButton("translate", "", checkable=True)       # translation (lit) / original on the video
+        self.b_tr.setChecked(bool(settings()["preview_translation"]))
+        self._tr_tip()
         self.b_mix = IconButton("mic", "Narration: make it and hear it while the video plays (no export). "
                                        "The timeline lights up as far as it is ready.", checkable=True)
         self.b_mix.setEnabled(False)
@@ -592,7 +600,7 @@ class Preview(QWidget):
         self.b_timeline = IconButton("timeline", "Timeline: put clips of the videos one after another, cut them, "
                                      "move the lines, give a line its own look", checkable=True)
         self.b_area.setVisible(False)            # drawn from Style → Box → Area (or Steps → OCR)
-        for w in (self.b_timeline, self.b_area, self.b_mix, self.b_cc, self.b_vol, self.vol, self.b_zout, self.zoom_label, self.b_zin, self.b_fit):
+        for w in (self.b_timeline, self.b_area, self.b_mix, self.b_tr, self.b_cc, self.b_vol, self.vol, self.b_zout, self.zoom_label, self.b_zin, self.b_fit):
             bar.addWidget(w)
 
         lay = QVBoxLayout(self)
@@ -608,6 +616,7 @@ class Preview(QWidget):
         self.b_prev.clicked.connect(lambda: self.jump_cue(-1))
         self.b_next.clicked.connect(lambda: self.jump_cue(1))
         self.b_cc.toggled.connect(self._cc)
+        self.b_tr.toggled.connect(self._tr_toggled)
         self.b_vol.clicked.connect(self._mute)
         self.vol.valueChanged.connect(self._volume)
         self.b_zin.clicked.connect(lambda: self.view.zoom(1.25))
@@ -635,6 +644,14 @@ class Preview(QWidget):
         self._move_timer.setSingleShot(True)
         self._move_timer.setInterval(60)
         self._move_timer.timeout.connect(lambda: self.seek(self.slider.value() / 1000))
+        # jumps are applied a moment later, the last one only, and not while the file is still loading: a jump
+        # given to Qt's player while it loads (or many in a row) has frozen the window inside setPosition
+        self._seek_to = None
+        self._seek_wait = 0
+        self._seek_timer = QTimer(self)
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.setInterval(15)
+        self._seek_timer.timeout.connect(self._do_seek)
         self.set_enabled(False)
         self.view.show_message("Add a video to start")
 
@@ -706,14 +723,43 @@ class Preview(QWidget):
         seconds = max(0.0, seconds)
         if self.seek_hook and self.seek_hook(seconds):   # a growing preview copy handles it
             return
-        self.player.setPosition(int(seconds * 1000))
+        self._seek_to = seconds
+        if not self._seek_timer.isActive():
+            self._seek_timer.start()
+
+    LOADING = (QMediaPlayer.MediaStatus.LoadingMedia, QMediaPlayer.MediaStatus.StalledMedia)
+
+    def _do_seek(self):
+        t = self._seek_to
+        if t is None:
+            return
+        status = self.player.mediaStatus()
+        if status in self.LOADING and self._seek_wait < 100:       # wait for the file (at most ~1.5 s)
+            self._seek_wait += 1
+            self._seek_timer.start()
+            return
+        self._seek_to, self._seek_wait = None, 0
+        if status == QMediaPlayer.MediaStatus.NoMedia:
+            return
+        if abs(self.player.position() / 1000 - t) < 0.5 / max(1.0, self.fps):     # already there
+            return
+        t0 = time.monotonic()
+        self.player.setPosition(int(t * 1000))
+        took = time.monotonic() - t0
+        if took > 0.5:
+            log.warning("Jump to %.2f s took %.1f s (player %s, %s)", t, took, status.name,
+                        self.player.playbackState().name)
+
+    def position(self) -> float:
+        """Seconds: where the video is, or where it is about to jump to."""
+        return self._seek_to if self._seek_to is not None else self.player.position() / 1000
 
     def seek_rel(self, delta: float):
-        self.seek(self.player.position() / 1000 + delta)
+        self.seek(self.position() + delta)
 
     def step_frame(self, n: int):
         self.player.pause()
-        self.seek(self.player.position() / 1000 + n / self.fps)
+        self.seek(self.position() + n / self.fps)
 
     def toggle(self):
         if not self.path:
@@ -948,6 +994,18 @@ class Preview(QWidget):
         self.seek(self.slider.value() / 1000)
         self.mix.hold(False)
         self.live.hold(False)
+
+    def _tr_tip(self):
+        self.b_tr.setToolTip("Showing the translation: click to see the original" if self.b_tr.isChecked() else
+                             "Showing the original: click to see the translation")
+
+    def _tr_toggled(self, on):
+        settings().update(preview_translation=on)
+        self._tr_tip()
+        self.which_changed.emit()
+
+    def shows_translation(self) -> bool:
+        return self.b_tr.isChecked()
 
     def _cc(self, on):
         settings().update(preview_show_subs=on)

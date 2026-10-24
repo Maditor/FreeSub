@@ -34,6 +34,7 @@ hidden += collect_submodules("vig2p") + collect_submodules("edge_tts") + collect
 EXCLUDES = [
     "piper", "nvidia",                                   # add-ons, see above
     "torch", "torchvision", "torchaudio", "tensorflow", "paddle", "openvino", "tensorrt",
+    "transformers", "accelerate", "librosa", "numba", "llvmlite", "qwen_asr", "gradio",     # never used by FreeSub
     "scipy", "matplotlib", "pandas", "IPython", "jupyter", "notebook", "tkinter", "pytest",
     "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick", "PySide6.QtWebChannel",
     "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtQuick", "PySide6.QtQuick3D", "PySide6.QtQml",

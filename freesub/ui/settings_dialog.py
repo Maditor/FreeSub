@@ -15,7 +15,7 @@ from ..i18n import LANGS, Keep
 from ..core import ffmpeg, models
 from ..core.jobs import Cancelled
 from ..translate import ai
-from .widgets import button, form_row, label, row, section
+from .widgets import button, form_row, heading, label, row, tick_row
 
 
 class _Sig(QObject):
@@ -74,25 +74,26 @@ class SettingsDialog(QDialog):
         self.ff_state = label("", muted=True, wrap=True)
         lay.addWidget(form_row("Theme", self.theme))
         lay.addWidget(form_row("Language", self.lang))
-        self.native_bar = QCheckBox("Use the Windows title bar (instead of FreeSub's own; after a restart)")
-        self.native_bar.setChecked(bool(s["native_titlebar"]))
-        lay.addWidget(self.native_bar)
+        self.title_bar = QComboBox()
+        for k, t in ((False, "Borderless"), (True, "Windows")):
+            self.title_bar.addItem(t, k)
+        self.title_bar.setCurrentIndex(1 if s["native_titlebar"] else 0)
+        self.title_bar.setToolTip("Borderless: FreeSub's own title bar. Windows: the usual Windows one. "
+                                  "Used after FreeSub is opened again.")
+        lay.addWidget(form_row("Title bar", self.title_bar))
         self.ask_close = QCheckBox("Ask before closing FreeSub")
         self.ask_close.setChecked(bool(s["confirm_close"]))
-        lay.addWidget(self.ask_close)
+        lay.addWidget(tick_row(self.ask_close))
         self.ask_actions = QCheckBox("Ask before Run and before deleting (clips, videos, projects)")
         self.ask_actions.setChecked("*" not in (s.get("confirm_skip") or []))
-        lay.addWidget(self.ask_actions)
-        lay.addSpacing(6)
-        lay.addWidget(section("Where results go"))
+        lay.addWidget(tick_row(self.ask_actions))
+        lay.addWidget(heading("Where results go"))
         lay.addWidget(self.r_video)
         lay.addWidget(row(self.r_custom, self.root, self.b_root))
-        lay.addSpacing(6)
-        lay.addWidget(section("ffmpeg"))
+        lay.addWidget(heading("ffmpeg"))
         lay.addWidget(row(self.ff, button("Browse", self._browse_ff), button("Check", self._test_ff)))
         lay.addWidget(self.ff_state)
-        lay.addSpacing(6)
-        lay.addWidget(section("Folders"))
+        lay.addWidget(heading("Folders"))
         lay.addWidget(row(button("Work files", lambda: self._open(os.path.join(data_dir(), "projects"))),
                           button("Models", lambda: self._open(models_dir())),
                           button("Log", lambda: self._open(logs_dir())),
@@ -107,7 +108,7 @@ class SettingsDialog(QDialog):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setSpacing(10)
-        lay.addWidget(section("Google Gemini"))
+        lay.addWidget(heading("Google Gemini"))
         self.g_key = QLineEdit(s["gemini_key"])
         self.g_key.setEchoMode(QLineEdit.Password)
         self.g_key.setPlaceholderText("API key from aistudio.google.com")
@@ -119,8 +120,7 @@ class SettingsDialog(QDialog):
         lay.addWidget(form_row("API key", self.g_key))
         lay.addWidget(form_row("Model", self.g_model))
         lay.addWidget(row(self.g_state, None, button("Test", lambda: self._test("gemini"))))
-        lay.addSpacing(6)
-        lay.addWidget(section("Cloudflare Workers AI"))
+        lay.addWidget(heading("Cloudflare Workers AI"))
         self.c_acc = QLineEdit(s["cloudflare_account"])
         self.c_acc.setPlaceholderText("Account ID")
         self.c_tok = QLineEdit(s["cloudflare_token"])
@@ -137,11 +137,11 @@ class SettingsDialog(QDialog):
         lay.addWidget(row(self.c_state, None, button("Test", lambda: self._test("cloudflare"))))
         lay.addSpacing(6)
         self.go_state = label("", muted=True, wrap=True)
-        lay.addWidget(section("Google Translate"))
+        lay.addWidget(heading("Google Translate"))
         lay.addWidget(row(self.go_state, None, button("Test", lambda: self._test("google"))))
         self.fallback = QCheckBox("If a service fails, use the other ones")
         self.fallback.setChecked(bool(s["translate_fallback"]))
-        lay.addWidget(self.fallback)
+        lay.addWidget(tick_row(self.fallback))
         lay.addStretch(1)
         return w
 
@@ -170,7 +170,7 @@ class SettingsDialog(QDialog):
             c.setCurrentIndex(max(0, c.findData(value)))
             return c
 
-        lay.addWidget(section("Speech recognition"))
+        lay.addWidget(heading("Speech recognition"))
         self.a_model = QComboBox()
         for name, (_repo, size, note, _l) in models.WHISPER.items():
             ready = " · downloaded" if models.whisper_ready(name) else ""
@@ -186,43 +186,33 @@ class SettingsDialog(QDialog):
         lay.addWidget(form_row("Model", self.a_model, "Downloads on first use"))
         lay.addWidget(form_row("Beam size", self.a_beam, "Higher = a little more accurate, slower"))
         lay.addWidget(form_row("Run on", self.a_device))
-        lay.addWidget(self.a_vad)
-        lay.addWidget(self.a_filt)
-        lay.addSpacing(6)
-        lay.addWidget(section("Reading hard subtitles (OCR)"))
+        lay.addWidget(tick_row(self.a_vad))
+        lay.addWidget(tick_row(self.a_filt))
+        lay.addWidget(heading("Separate voice and background"))
+        self.a_sep_subs = QCheckBox("Before making subtitles")
+        self.a_sep_subs.setToolTip("Clearer recognition in films and anime with music")
+        self.a_sep_subs.setChecked(bool(s["whisper_separate"]))
+        self.a_sep_dub = QCheckBox("For the narration")
+        self.a_sep_dub.setToolTip("Three volumes in Narration: the narration, the background (music, effects) "
+                                  "and the original voice. Off: the narration and the whole original sound")
+        self.a_sep_dub.setChecked(bool(s["dub_separate"]))
+        lay.addWidget(tick_row(self.a_sep_subs))
+        lay.addWidget(tick_row(self.a_sep_dub))
+        lay.addWidget(heading("Reading hard subtitles (OCR)"))
         self.a_fps = spin(0.5, 10, float(s["ocr_fps"]), 0.5, " frames per second", 1)
         lay.addWidget(form_row("Frames read", self.a_fps, "More = more exact timing, slower"))
-        self.a_thorough = QCheckBox("Read every frame (much slower; a little more exact when the picture behind "
-                                    "the subtitles is very busy)")
+        self.a_thorough = QCheckBox("Read every frame (takes longer)")
+        self.a_thorough.setToolTip("A little more exact when the picture behind the subtitles is very busy")
         self.a_thorough.setChecked(bool(s["ocr_thorough"]))
-        lay.addWidget(self.a_thorough)
-        lay.addSpacing(6)
-        lay.addWidget(section("Batch"))
+        lay.addWidget(tick_row(self.a_thorough))
+        lay.addWidget(heading("Batch"))
         self.a_lanes = combo([("auto", "Auto (two when this PC has room)"), ("1", "One at a time"),
                               ("2", "Two at a time")], str(s["parallel_videos"]))
         lay.addWidget(form_row("Videos at once", self.a_lanes,
                                "Two at a time: while one video gets its narration and export, the next one's "
                                "subtitles are made. Faster on most PCs, never more graphics memory. Auto picks "
                                "it on a PC with 4+ cores and 8+ GB of memory (and a graphics card, or 8 cores)"))
-        lay.addSpacing(6)
-        lay.addWidget(section("Narration"))
-        self.a_up = spin(1.0, 1.6, float(s["dub_max_speed"]), 0.05, " x", 2)
-        lay.addWidget(form_row("Fastest reading", self.a_up,
-                               "A long line is first given more time (it may start a little early or run on "
-                               "into the next line); only then is it read faster, at most this much"))
-        self.a_join = QCheckBox("Read short lines that belong together as one sentence")
-        self.a_join.setToolTip("A sentence split over two lines, or a long line next to a short one, is read "
-                               "in one go over both lines' time. The subtitles do not change.")
-        self.a_join.setChecked(bool(s["dub_join"]))
-        lay.addWidget(self.a_join)
-        self.a_sync = QCheckBox("Subtitles follow the narration")
-        self.a_sync.setToolTip("When a line is read a little earlier or later (or with the next one), its "
-                               "subtitle moves with it, in the preview and in the exported video. "
-                               "The subtitle files (.srt) keep the original times.")
-        self.a_sync.setChecked(bool(s["dub_sync_subs"]))
-        lay.addWidget(self.a_sync)
-        lay.addSpacing(6)
-        lay.addWidget(section("Video"))
+        lay.addWidget(heading("Video"))
         self.a_enc = combo([("auto", "Auto (fastest that works)")] + [(e, n) for e, _c, n in ex.ENCODERS],
                            s["export_encoder"])
         self.a_enc_state = label("", muted=True, wrap=True)
@@ -282,13 +272,14 @@ class SettingsDialog(QDialog):
         lay.addWidget(row(None, self.b_all))
         lay.addSpacing(4)
         self.dl_rows = {}
-        heads = {"ffmpeg": "Needed", "gpu": "Graphics card", "whisper:tiny": "Speech recognition (Whisper)",
+        heads = {"ffmpeg": "Needed", "gpu": "Graphics card", f"whisper:{next(iter(models.WHISPER))}":
+                 "Speech recognition (Whisper)",
                  "separate": "Sound", "piper": "Narration voices"}
         for key, title, desc, size, _ready, _get, remove in self._download_items():
             if key in heads:
                 if key != "ffmpeg":
                     lay.addSpacing(8)
-                lay.addWidget(section(heads[key]))
+                lay.addWidget(heading(heads[key]))
             name = label(title)
             name.setStyleSheet("font-weight: 600;")
             info = label(f"{desc} · {size}", muted=True, wrap=True)
@@ -300,8 +291,8 @@ class SettingsDialog(QDialog):
             tl.addWidget(name)
             tl.addWidget(info)
             state = label("", muted=True)
-            b_get = button("Download", lambda k=key: self._download(k))
-            b_del = button("Delete", lambda k=key: self._remove(k)) if remove else None
+            b_get = button("Download", lambda _c=False, k=key: self._download(k))
+            b_del = button("Delete", lambda _c=False, k=key: self._remove(k)) if remove else None
             widgets = [text, state, b_get] + ([b_del] if b_del else [])
             lay.addWidget(row(*widgets))
             self.dl_rows[key] = (state, b_get, b_del)
@@ -446,28 +437,21 @@ class SettingsDialog(QDialog):
         lay.addWidget(label("Subtitles from speech or from the picture, translation, narration and video export. "
                             "Free and open source (MIT licence).", muted=True, wrap=True))
         lay.addWidget(row(button("GitHub page", lambda: QDesktopServices.openUrl(QUrl(APP_URL))), None))
-
-        lay.addSpacing(6)
-        lay.addWidget(section("This PC"))
+        lay.addWidget(heading("This PC"))
         gpu = getattr(getattr(self.parent(), "recipe", None), "gpu_text", "") or "Checking…"
         lay.addWidget(label(gpu, wrap=True))
         lay.addWidget(label(f"ffmpeg: {ffmpeg.version() or 'not found'}", muted=True, wrap=True))
-
-        lay.addSpacing(6)
-        lay.addWidget(section("Speech quality"))
-        lay.addWidget(label("Fast: a quick draft. Balanced: good for most videos. Best: slowest and most accurate "
-                            "(kotoba-whisper for Japanese, PhoWhisper for Vietnamese, large-v3 for the rest). "
-                            "Separating the voice from the music helps films and anime.", muted=True, wrap=True))
-
-        lay.addSpacing(6)
-        lay.addWidget(section("Narration voices"))
+        lay.addWidget(heading("Speech models"))
+        lay.addWidget(label("Models with \"turbo\" in their name are faster but less accurate. Chinese: "
+                            "belle-large-v3-zh. Japanese: kotoba-whisper-v2.0. Other languages: large-v3. "
+                            "Advanced → Separate voice and background → Before making subtitles makes films and "
+                            "anime more accurate.", muted=True, wrap=True))
+        lay.addWidget(heading("Narration voices"))
         lay.addWidget(label("Edge: Microsoft's online voices (needs the internet). Piper: offline voices from the "
                             "Piper project. Kokoro: offline Vietnamese voices.", muted=True, wrap=True))
         lay.addWidget(label(kokoro.NOTE, wrap=True))
         lay.addWidget(row(button("Kokoro page", lambda: QDesktopServices.openUrl(QUrl(kokoro.PAGE))), None))
-
-        lay.addSpacing(6)
-        lay.addWidget(section("Made with"))
+        lay.addWidget(heading("Made with"))
         lay.addWidget(label("faster-whisper (speech), RapidOCR (reading the picture), an MDX-Net model (voice / music "
                             "separation), CAM++ from 3D-Speaker (telling speakers apart), vig2p / sea-g2p "
                             "(Vietnamese phonemes), ffmpeg, Qt for Python. Each is used under its own licence; "
@@ -491,14 +475,11 @@ class SettingsDialog(QDialog):
     def _store_advanced(self):
         s = settings()
         model, beam = self.a_model.currentData(), self.a_beam.value()
-        quality = s["whisper_quality"]
-        if model != s["whisper_model"] or beam != int(s["whisper_beam"]):
-            quality = "custom"
-        s.update(whisper_model=model, whisper_beam=beam, whisper_quality=quality,
+        s.update(whisper_model=model, whisper_beam=beam,
                  whisper_device=self.a_device.currentData(), whisper_vad=self.a_vad.isChecked(),
-                 whisper_filter=self.a_filt.isChecked(), ocr_fps=self.a_fps.value(), ocr_thorough=self.a_thorough.isChecked(), dub_max_speed=self.a_up.value(),
-                 dub_join=self.a_join.isChecked(), dub_sync_subs=self.a_sync.isChecked(),
+                 whisper_filter=self.a_filt.isChecked(), ocr_fps=self.a_fps.value(), ocr_thorough=self.a_thorough.isChecked(),
                  parallel_videos=self.a_lanes.currentData(),
+                 whisper_separate=self.a_sep_subs.isChecked(), dub_separate=self.a_sep_dub.isChecked(),
                  export_encoder=self.a_enc.currentData(), export_container=self.a_cont.currentData(),
                  translate_fallback=self.fallback.isChecked())
 
@@ -570,7 +551,7 @@ class SettingsDialog(QDialog):
         self._store_keys()
         self._store_advanced()
         old_lang = ui_language()
-        settings().update(native_titlebar=self.native_bar.isChecked(), language=self.lang.currentData(),
+        settings().update(native_titlebar=bool(self.title_bar.currentData()), language=self.lang.currentData(),
                           confirm_close=self.ask_close.isChecked(),
                           confirm_skip=[] if self.ask_actions.isChecked() else ["*"])
         if ui_language() != old_lang:

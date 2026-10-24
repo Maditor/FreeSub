@@ -8,15 +8,13 @@ TARGETS = ["vi", "en", "ja", "ko", "zh", "th", "id", "fr", "es", "de", "ru", "pt
 def fields():
     """[(title, [(label, {setting: value, ...}), ...])]: each choice sets one or more settings."""
     from ..steps import export as ex
+    from . import models
     return [
         ("Subtitles from", [("Speech", {"subs_source": "speech"}),
                             ("The picture (OCR)", {"subs_source": "ocr"})]),
         ("Spoken language", [("Auto detect", {"whisper_language": "auto"})] +
          [(f"{v} ({k})", {"whisper_language": k}) for k, v in LANGS.items()]),
-        ("Speech quality", [("Fast", {"whisper_quality": "fast", "whisper_model": "large-v3-turbo", "whisper_beam": 1}),
-                            ("Balanced", {"whisper_quality": "balanced", "whisper_model": "large-v3-turbo",
-                                          "whisper_beam": 5}),
-                            ("Best", {"whisper_quality": "best", "whisper_model": "large-v3", "whisper_beam": 5})]),
+        ("Speech model", [(n, {"whisper_model": n}) for n in models.WHISPER]),
         ("Translate", [("Off", {"do_translate": False})] +
          [(f"Into {LANGS.get(k, k)}", {"do_translate": True, "target_lang": k}) for k in TARGETS]),
         ("Narration", [("Off", {"do_voice": False}), ("On", {"do_voice": True})]),

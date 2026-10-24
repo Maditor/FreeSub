@@ -9,13 +9,14 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QLa
                                QSizePolicy,
                                QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
+from ..core import models
 from ..config import settings
 from ..core import addons, gpu
 from ..langs import LANGS
 from ..tts import voices
 from .panels.voice import DictionaryDialog, Speaker
 from ..i18n import Keep, tr
-from .widgets import Card, IconButton, MenuPicker, Segmented, button, form_row, label, row, wait_cursor
+from .widgets import Card, IconButton, MenuPicker, Segmented, button, form_row, heading, label, row, tick_row, wait_cursor
 
 TARGETS = ["vi", "en", "ja", "ko", "zh", "th", "id", "fr", "es", "de", "ru", "pt"]
 SERVICE_TEXT = {"google": "Google Translate (free, no key)", "gemini": "Gemini (AI, API key)",
@@ -55,6 +56,7 @@ class Recipe(QWidget):
     changed = Signal()                      # an option the preview shows changed
     mix_changed = Signal()                  # a narration volume changed (the live preview follows)
     narration_preview = Signal()            # make the narration of this video and listen to it
+    sync_changed = Signal()                 # "Subtitles follow the narration" was switched here
 
     def __init__(self):
         super().__init__()
@@ -122,12 +124,12 @@ class Recipe(QWidget):
         self.quality = QComboBox()
         self.gpu_text = ""
         sl.addWidget(form_row("Language", self.lang, "Language spoken in the video"))
-        sl.addWidget(form_row("Quality", self.quality))
+        sl.addWidget(form_row("Model", self.quality, "Speech recognition model (details in Settings → Advanced)"))
         self.speakers = QCheckBox("New line when the speaker changes")
         self.speakers.setToolTip("Tells the voices apart: two people in one line become two lines, and each "
                                  "person keeps one narration voice. Downloads a 28 MB model on first use.")
         self.speakers.setChecked(bool(s["whisper_speakers"]))
-        sl.addWidget(self.speakers)
+        sl.addWidget(tick_row(self.speakers))
         lay.addWidget(self.speech_box)
 
         # --- OCR
@@ -156,16 +158,11 @@ class Recipe(QWidget):
         self._speech_lay, self._ocr_lay = sl, ol
         self._show_names()
 
-        self.separate = QCheckBox("Separate the voice from music first")
-        self.separate.setToolTip("Clearer recognition in films and anime with music")
-        self.separate.setChecked(bool(s["whisper_separate"]))
-        lay.addWidget(self.separate)
 
         self.sync_quality()
         self.lang.currentIndexChanged.connect(self._lang)
         self.quality.currentIndexChanged.connect(self._quality)
         self.speakers.toggled.connect(_save("whisper_speakers"))
-        self.separate.toggled.connect(lambda v: (settings().update(whisper_separate=v), self.refresh()))
         self._source(s["subs_source"], save=False)
         return w
 
@@ -189,48 +186,31 @@ class Recipe(QWidget):
         else:
             self.area_state.setText("No area yet: press the button, then drag a box around the subtitles.")
 
-    def preset(self, q):
-        special = {"ja": "kotoba-whisper-v2.0", "vi": "phowhisper-large"}.get(self.lang.currentData())
-        return {"fast": dict(model="large-v3-turbo", beam=1),
-                "balanced": dict(model="large-v3-turbo", beam=5),
-                "best": dict(model=special or "large-v3", beam=5)}.get(q)
-
     def sync_quality(self):
-        """Fill the Quality list ('Custom' only when a model was picked in Settings → Advanced)."""
-        q = settings()["whisper_quality"]
+        """Fill the Model list with the models for the chosen language (names only: what each one is good at is
+        in Settings → Advanced). A model that does not fit the language any more becomes the default."""
+        lang = self.lang.currentData()
+        s = settings()
+        name = models.fit(s["whisper_model"], lang)
+        if name != s["whisper_model"]:
+            s.update(whisper_model=name)
         self.quality.blockSignals(True)
         self.quality.clear()
-        items = [("fast", "Fast"), ("balanced", "Balanced"), ("best", "Best")]
-        if q == "custom":
-            items.append(("custom", f"Custom · {settings()['whisper_model']}"))
-        for k, txt in items:
-            self.quality.addItem(txt, k)
-        self.quality.setCurrentIndex(max(0, self.quality.findData(q)))
+        for n in models.for_language(lang):
+            self.quality.addItem(n, n)
+        self.quality.setCurrentIndex(max(0, self.quality.findData(name)))
         self.quality.blockSignals(False)
-        self._quality_text()
 
     def _quality(self):
-        q = self.quality.currentData()
-        p = self.preset(q)
-        if p:
-            settings().update(whisper_quality=q, whisper_model=p["model"], whisper_beam=p["beam"])
+        name = self.quality.currentData()
+        if name:
+            settings().update(whisper_model=name)
         self.sync_quality()
         self.refresh()
 
-    def _quality_text(self):
-        q = self.quality.currentData()
-        lang = self.lang.currentData()
-        self.quality.setToolTip({
-            "fast": "Quick draft.", "balanced": "Good for most videos.",
-            "best": "Slowest, most accurate: " + ("kotoba-whisper (Japanese)." if lang == "ja" else
-                                                  "PhoWhisper (Vietnamese)." if lang == "vi" else "large-v3."),
-            "custom": "Model and options from Settings → Advanced."}.get(q, ""))
-
     def _lang(self):
         settings().update(whisper_language=self.lang.currentData())
-        if self.quality.currentData() == "best":
-            self._quality()
-        self._quality_text()
+        self.sync_quality()
 
     def refresh_model(self):
         """Kept for the main window (called after a download); the model choice lives in Settings now."""
@@ -304,10 +284,12 @@ class Recipe(QWidget):
         self._show_names()
         self.changed.emit()
 
+    subtitle_source = None              # the window: () -> (original lines, translated lines, language, video name)
+
     def _edit_names(self):
         from .names_dialog import NamesDialog
         with wait_cursor():
-            dlg = NamesDialog(self, settings()["names_list"])
+            dlg = NamesDialog(self, settings()["names_list"], self.subtitle_source)
             if not dlg.work:
                 dlg._new()                                  # no list yet: start one
         if dlg.exec():
@@ -382,23 +364,25 @@ class Recipe(QWidget):
         self.b_piper = button("Download the Piper voice (63 MB)", self.download_voice.emit)
         self.b_piper.setToolTip("Kokoro voices are made by a third party: see Settings → About")
         self.speed = _spin(50, 200, int(s["tts_speed"]), 5, " %")
-        self.one = QCheckBox("One voice for all")
-        self.one.setToolTip("Read every line with the same voice: the one in the row above. Untick it for a "
-                            "women's and a men's voice (in testing: some lines may get the wrong voice)")
+        self.maxspeed = _spin(self.speed.value(), 200, int(s["dub_max_pct"]), 5, " %")   # never under the minimum
+        self.auto = QCheckBox("Adjust the reading speed and subtitles automatically")
+        self.auto.setToolTip("Read faster or slower between the minimum and maximum speed, join short lines, "
+                             "and move the subtitles with the voice")
+        self.auto.setChecked(bool(s.get("dub_auto", True)))
+        self.one = _combo([("one", "One voice for all"),
+                           ("split", "Women's and men's voices (testing)")], s["voice_mode"])
+        self.one.setToolTip("Women's and men's voices: a line may get the wrong voice. Fix it in the Voice "
+                            "column of the subtitle table")
         self.split_note = label("Women's / men's voices are in testing: a line may get the wrong voice. Fix it "
                                 "in the Voice column of the subtitle table.", muted=True, wrap=True)
-        self.one.setChecked(s["voice_mode"] != "split")
-        self.respell = QCheckBox("Read foreign names the Vietnamese way")
+        self.respell = QCheckBox("Read with the dictionary")
+        self.respell.setToolTip("Words in the Dictionary (and foreign names) are read the way written there")
         self.respell.setChecked(bool(s["tts_respell"]))
         self.dubvol = _spin(0, 200, int(s["dub_volume"]), 5, " %")
         self.bg = _spin(0, 200, int(s["dub_bg_volume"]), 5, " %")
         self.voicevol = _spin(0, 200, int(s["dub_voice_volume"]), 5, " %")
         self.duck = QCheckBox("Lower the original voice while the narration speaks")
         self.duck.setChecked(bool(s["dub_duck"]))
-        self.split = QCheckBox("Split the original voice from the music")
-        self.split.setToolTip("Needed to set the original voice apart from the music and effects. "
-                              "Without it, both follow the Background volume.")
-        self.split.setChecked(bool(s["dub_separate"]))
         self.b_hear = button("Preview narration", self.narration_preview.emit)
         self.b_hear.setToolTip("Make the narration of the selected video (no export) and play it in the preview, "
                                "with these volumes. Change them while it plays.")
@@ -413,7 +397,15 @@ class Recipe(QWidget):
         self.test.setCursorPosition(0)             # show the start of the sentence, not its end
         self.listen_state.hide()                   # only while there is something to say
         self.speaker.state.connect(lambda t: (self.listen_state.setText(t), self.listen_state.setVisible(bool(t))))
-        lay.addWidget(form_row("Voice", self.engine))
+        def group(text, first=False):            # one group per job: accent heading + line (widgets.heading)
+            h = heading(text)
+            if first:
+                h.layout().setContentsMargins(0, 0, 0, 0)
+            lay.addWidget(h)
+        group("Voice", first=True)
+        lay.addWidget(form_row("Engine", self.engine))
+        self.one_row = form_row("Readers", self.one)
+        lay.addWidget(self.one_row)
         self.female_row = form_row("Women", self.female)
         self.male_row = form_row("Men", self.male)
         lay.addWidget(self.female_row)
@@ -421,45 +413,79 @@ class Recipe(QWidget):
         self.split_note.setVisible(False)
         lay.addWidget(self.b_piper)
         from PySide6.QtWidgets import QSizePolicy
+        group("Timing")
         self.speed.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        speed_row = row(self.speed, self.one, spacing=12)
-        lay.addWidget(form_row("Speed", speed_row))
-        lay.addWidget(self.respell)
+        lay.addWidget(tick_row(self.auto))
+        self.speed_row = form_row("Minimum speed", self.speed)
+        self.max_row = form_row("Maximum speed", self.maxspeed, "Never faster than this (100 % = normal speed)")
+        lay.addWidget(self.speed_row)
+        lay.addWidget(self.max_row)
+        self._auto_rows()
+        group("Pronunciation")
+        lay.addWidget(tick_row(self.respell))
         lay.addWidget(row(self.test, self.b_listen, self.b_dict))
         lay.addWidget(self.listen_state)
-        lay.addWidget(label("Sound mix", muted=True))
+        group("Sound mix")
+        lay.addWidget(tick_row(self.duck))
         lay.addWidget(form_row("Narration", self.dubvol, "The narration voice"))
-        lay.addWidget(form_row("Background", self.bg, "Music and effects of the video"))
-        lay.addWidget(form_row("Original voice", self.voicevol, "The voices of the video"))
-        lay.addWidget(self.duck)
-        lay.addWidget(self.split)
+        self.bg_row = form_row("Background", self.bg)
+        self.voice_row = form_row("Original voice", self.voicevol, "The voices of the video")
+        lay.addWidget(self.bg_row)
+        lay.addWidget(self.voice_row)
         # hearing the narration: the mic button on the video (no button here)
         self.engine.currentIndexChanged.connect(lambda: (settings().update(tts_engine=self.engine.currentData()),
                                                          self.refresh_voice()))
         self.female.currentIndexChanged.connect(lambda: self._voice_pick("female", self.female))
         self.male.currentIndexChanged.connect(lambda: self._voice_pick("male", self.male))
         self.speed.valueChanged.connect(_save("tts_speed"))
-        self.one.toggled.connect(lambda v: (settings().update(voice_mode="one" if v else "split"), self.refresh_voice()))
+        self.maxspeed.valueChanged.connect(_save("dub_max_pct"))
+        self.speed.valueChanged.connect(self.maxspeed.setMinimum)       # the maximum follows the minimum up
+        self.auto.toggled.connect(self._auto_toggled)
+        self.one.currentIndexChanged.connect(lambda: (settings().update(voice_mode=self.one.currentData()),
+                                                      self.refresh_voice()))
         self.respell.toggled.connect(_save("tts_respell"))
         for wdg, key in ((self.dubvol, "dub_volume"), (self.bg, "dub_bg_volume"), (self.voicevol, "dub_voice_volume")):
             wdg.valueChanged.connect(lambda v, k=key: (settings().update(**{k: v}), self.mix_changed.emit()))
         self.duck.toggled.connect(lambda v: (settings().update(dub_duck=v), self.mix_changed.emit()))
-        self.split.toggled.connect(lambda v: (settings().update(dub_separate=v), self.refresh_mix_state(None)))
         self.test.editingFinished.connect(lambda: settings().update(tts_test_text=self.test.text()))
         self.refresh_voice()
         self.refresh_mix_state(False)
         return w
 
-    def refresh_mix_state(self, has_split):
-        """has_split: the selected video has its voice and music apart (None = unknown)."""
-        if has_split is not None:
-            self._has_split = has_split
-        split = getattr(self, "_has_split", False)
-        self.voicevol.setEnabled(split or self.split.isChecked())
-        tip = ("The voices of the video" if split or self.split.isChecked() else
-               "Needs 'Split the original voice from the music': without it the whole original sound follows "
-               "Background")
-        self.voicevol.setToolTip(tip)
+    def _auto_rows(self):
+        """Automatic: a minimum and a maximum speed. Off: one reading speed, set by hand."""
+        on = self.auto.isChecked()
+        from PySide6.QtWidgets import QLabel
+        lb = self.speed_row.findChild(QLabel)
+        lb.setText("Minimum speed" if on else "Reading speed")
+        tip = "How fast every line is read to begin with (100 % = normal speed)" if on else \
+            "Every line is read at this speed (100 % = normal speed)"
+        lb.setToolTip(tip)
+        self.speed.setToolTip(tip)
+        self.max_row.setVisible(on)
+
+    def _auto_toggled(self, on):
+        """One switch for three things: speed between min and max, short lines joined, subtitles follow the
+        voice (the headset button of the subtitle table follows too; it can still be switched on its own)."""
+        settings().update(dub_auto=on, dub_join=on, dub_sync_subs=on)
+        self._auto_rows()
+        self.sync_changed.emit()
+
+    def refresh_dub_options(self):
+        """The headset button of the subtitle table was switched: it only changes which times are shown, the
+        automatic switch stays as it is."""
+
+    def refresh_mix_state(self, _has_split=None):
+        """Settings → Advanced → Separate voice and background → For the narration: on = three volumes
+        (narration, background, original voice); off = two (narration, the whole original sound)."""
+        from PySide6.QtWidgets import QLabel
+        apart = bool(settings()["dub_separate"])
+        self.voice_row.setVisible(apart)
+        lb = self.bg_row.findChild(QLabel)
+        lb.setText("Background" if apart else "Original sound")
+        tip = "Music and effects of the video" if apart else "The whole sound of the video"
+        lb.setToolTip(tip)
+        self.bg.setToolTip(tip)
 
     def _voice_pick(self, who, combo):
         eng = self.engine.currentData()
@@ -495,7 +521,7 @@ class Recipe(QWidget):
         lab = self.female_row.findChild(QLabel)
         if lab is not None:                        # one voice: the women's row holds the voice for every line
             lab.setText("All lines" if one else "Women")
-        self.one.setVisible(named)
+        self.one_row.setVisible(named)
         if named:
             self._fill_voices(eng)
         if eng == "piper":
@@ -509,16 +535,14 @@ class Recipe(QWidget):
             need = False
         self.b_piper.setVisible(need)
         self.b_listen.setEnabled(not need)
+        self.refresh_dub_options()
 
     # ================================================================ summary
     def refresh(self):
         if not hasattr(self, "b_export"):          # still being built
             return
         s = settings()
-        src = "OCR" if s["subs_source"] == "ocr" else f"Speech · {s['whisper_quality'].capitalize()}"
-        self.subs_card.set_summary(src)
-        self.tr_card.set_summary(f"{s['translator'].capitalize()} → {LANGS.get(s['target_lang'], s['target_lang'])}")
-        self.voice_card.set_summary({"edge": "Edge", "piper": "Piper", "kokoro": "Kokoro"}.get(s["tts_engine"], ""))
+        self.refresh_mix_state()                     # Settings → Advanced may have changed the separation
         self.refresh_keys()
         steps = []
         if s["do_subtitles"]:
@@ -555,7 +579,7 @@ class Recipe(QWidget):
         self.buttons_row.setVisible(False)
 
     def set_busy(self, busy):
-        for b in (self.b_export, self.b_subs, self.b_piper, self.b_hear):
+        for b in (self.b_piper, self.b_hear):          # Export / Subtitles stay: they add to the run
             b.setEnabled(not busy)
         if not busy:
             self.refresh()

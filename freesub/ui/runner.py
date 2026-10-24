@@ -1,6 +1,7 @@
 """Runs steps on a worker thread and turns their callbacks into Qt signals (one job at a time)."""
 import logging
 import threading
+import time
 
 from PySide6.QtCore import QObject, Signal
 
@@ -29,6 +30,11 @@ class Runner(QObject):
         self.control = None
         self.thread = None
         self.watch = None
+        self.started_at = {}                    # video -> time.monotonic() its settings were taken (this run)
+        self._queue = None                      # the videos of the run going on: more can be added (enqueue)
+        self._qlock = threading.Lock()
+        self._closed = True
+        self._upto = None
 
     def _before_write(self, video):
         import threading
@@ -63,6 +69,37 @@ class Runner(QObject):
         c._stop, c._run = self.control._stop, self.control._run       # noqa: SLF001
         return c, cur
 
+    # ---- the run's list of videos: it can grow while the run goes on (Export pressed again meanwhile)
+    def _next(self, i):
+        """The i-th video of the run, or None when there is none (then nothing more can be added)."""
+        with self._qlock:
+            if i < len(self._queue):
+                return self._queue[i]
+            self._closed = True
+            return None
+
+    def _count(self):
+        with self._qlock:
+            return len(self._queue)
+
+    def _take(self, v):
+        """A video's turn starts: its settings are fixed now (see pipeline.frozen_settings)."""
+        self.started_at[v] = time.monotonic()
+        return pipeline.frozen_settings(v)
+
+    def enqueue(self, videos, upto=None) -> int:
+        """More videos for the run going on (same kind of run). Returns how many were added; 0 = they can not
+        join it (another kind of run, or it is just ending): start them after it."""
+        with self._qlock:
+            if not self.busy or self._closed or self._queue is None or upto != self._upto:
+                return 0
+            self._queue.extend(videos)
+            return len(videos)
+
+    def accepts(self, upto=None) -> bool:
+        with self._qlock:
+            return self.busy and not self._closed and self._queue is not None and upto == self._upto
+
     def run_videos(self, videos, steps=None, force=False, title="Working", upto=None):
         """Run `steps` (None = the saved recipe) on every video; one failing video does not stop the others."""
         if self.busy or not videos:
@@ -70,14 +107,24 @@ class Runner(QObject):
         control = self._new_control()
         shown = list(steps) if steps is not None else pipeline.recipe(None, upto)
         self.started.emit(title, shown)
+        self.started_at = {}
+        with self._qlock:
+            self._queue = list(videos)
+            self._closed = steps is not None or bool(force)     # only the plain recipe takes more videos
+            self._upto = upto
 
         def work():
-            failed, errors = 0, []
-            for i, v in enumerate(videos):
+            failed, errors, i = 0, [], 0
+            while True:
+                v = self._next(i)
+                if v is None:
+                    break
                 self._cur["v"] = v
-                self.video_started.emit(v, i, len(videos))
+                self.video_started.emit(v, i, self._count())
+                i += 1
                 try:
-                    pipeline.run_video(v, steps, control, force=force, upto=upto,
+                    frozen = self._take(v)
+                    pipeline.run_video(v, steps, control, force=force, upto=upto, frozen=frozen,
                                        on_step=lambda sid, st, txt, v=v: self.step.emit(v, sid, st, txt))
                     self.video_finished.emit(v, "done")
                 except Cancelled:
@@ -89,7 +136,7 @@ class Runner(QObject):
                     errors.append(str(e))
                     self.video_finished.emit(v, "failed")
             if failed:
-                msg = errors[0] if len(videos) == 1 else f"{failed} of {len(videos)} videos failed: {errors[0]}"
+                msg = errors[0] if i == 1 else f"{failed} of {i} videos failed: {errors[0]}"
                 self.finished.emit("failed", msg)
             else:
                 self.finished.emit("done", f"Finished in {self._elapsed()}")
@@ -136,8 +183,8 @@ class Runner(QObject):
         ahead, so at most two are open."""
         import queue
         log.info("Batch: two videos at a time (subtitles of the next while the last is narrated / exported)")
-        n = len(videos)
         ca, cur_a = self._lane_control("")
+        frozen = {}
         cb, cur_b = self._lane_control("")
         ready = queue.Queue(maxsize=1)
         lock = threading.Lock()
@@ -151,13 +198,17 @@ class Runner(QObject):
 
         def lane_a():
             try:
-                for i, v in enumerate(videos):
-                    if ca.stopped:
+                i = 0
+                while True:
+                    v = self._next(i)
+                    if v is None or ca.stopped:
                         break
                     cur_a["v"] = v
-                    self.video_started.emit(v, i, n)
+                    self.video_started.emit(v, i, self._count())
+                    i += 1
                     try:
-                        pipeline.run_video(v, None, ca, force=force, part="front",
+                        frozen[v] = self._take(v)          # the back half uses the same settings
+                        pipeline.run_video(v, None, ca, force=force, part="front", frozen=frozen[v],
                                            on_step=lambda sid, st, txt, v=v: self.step.emit(v, sid, st, txt))
                     except Cancelled:
                         res["stopped"] = True
@@ -183,7 +234,7 @@ class Runner(QObject):
                     return
                 cur_b["v"] = v
                 try:
-                    pipeline.run_video(v, None, cb, force=force, part="back",
+                    pipeline.run_video(v, None, cb, force=force, part="back", frozen=frozen.get(v),
                                        on_step=lambda sid, st, txt, v=v: self.step.emit(v, sid, st, txt))
                     self.video_finished.emit(v, "done")
                 except Cancelled:
@@ -204,6 +255,7 @@ class Runner(QObject):
         if res["stopped"] or self.control.stopped:
             self.finished.emit("stopped", "Stopped")
         elif res["failed"]:
+            n = self._count()
             msg = res["errors"][0] if n == 1 else f"{res['failed']} of {n} videos failed: {res['errors'][0]}"
             self.finished.emit("failed", msg)
         else:

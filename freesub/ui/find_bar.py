@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFrame, QHBoxLayout, QLi
 
 from ..i18n import tr
 from . import theme
-from .widgets import IconButton, button, label
+from .widgets import IconButton, button, label, tick_row
 
 
 class _Drop(QToolButton):
@@ -32,8 +32,8 @@ class _Drop(QToolButton):
             box.toggled.connect(self._toggled)
             holder = QWidget()
             lay = QHBoxLayout(holder)
-            lay.setContentsMargins(12, 5, 16, 5)
-            lay.addWidget(box)
+            lay.setContentsMargins(12, 5, 12, 5)
+            lay.addWidget(tick_row(box))                  # text on the left, box on the right (like Steps)
             act = QWidgetAction(menu)
             act.setDefaultWidget(holder)
             menu.addAction(act)
@@ -207,6 +207,9 @@ class FindDelegate(QStyledItemDelegate):
         self.marks = {}
 
     def paint(self, painter, option, index):
+        back = index.data(Qt.BackgroundRole)          # a row colour (lines read late): the stylesheet hides it
+        if back is not None:
+            painter.fillRect(option.rect.adjusted(0, 0, 0, -1), back)
         super().paint(painter, option, index)
         marks = self.marks.get((index.row(), index.column()))
         if not marks:

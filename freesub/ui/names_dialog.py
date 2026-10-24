@@ -1,8 +1,10 @@
 """Name lists editor: the lists on the left (double-click one to rename it), its names on the right in two
 columns, the original and the translation. Nothing is written until Save; closing without saving asks first."""
 import copy
+import logging
+import threading
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QHBoxLayout, QHeaderView, QListWidget, QListWidgetItem,
                                QMenu, QMessageBox, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
@@ -10,10 +12,22 @@ from ..i18n import Keep, tr
 from ..translate import names
 from .widgets import IconButton, button, row
 
+log = logging.getLogger(__name__)
+KIND_TEXT = {"person": "Person", "place": "Place", "group": "Group", "term": "Term"}
+
+
+class _Done(QObject):
+    done = Signal(object, str)            # (found list or None, error text)
+
 
 class NamesDialog(QDialog):
-    def __init__(self, parent=None, current: str = ""):
+    def __init__(self, parent=None, current: str = "", source=None):
+        """source(): (original lines, translated lines, spoken language, video name) of the video open in the
+        window, for "Find names in the subtitles" (None: no video)."""
         super().__init__(parent)
+        self.source = source
+        self._sig = _Done()
+        self._sig.done.connect(self._found)
         self.setWindowTitle("Name lists")
         self.resize(860, 560)
         self.work = copy.deepcopy(names.all_lists())        # edited here, written on Save
@@ -34,7 +48,7 @@ class NamesDialog(QDialog):
         left.addWidget(self.b_new)
 
         self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels([tr("Original"), tr("Translation (empty: keep it)")])
+        self.table.setHorizontalHeaderLabels([tr("Original"), tr("Translation")])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -42,11 +56,14 @@ class NamesDialog(QDialog):
         self.b_delete = IconButton("delete", "Delete this list", size=20)
         self.b_delete.clicked.connect(self._delete)
         self.b_row_del = button("Remove the selected names", self._remove_rows)
+        self.b_find = button("Find names in the subtitles", self._find, icon="search")
+        self.b_find.setToolTip("The AI (Gemini or Cloudflare) reads the subtitles of the video that is open and "
+                               "suggests its names and special words, with a translation. You choose which to add.")
         self.b_save = button("Save", self._save, primary=True)
         right = QVBoxLayout()
         right.setSpacing(8)
         right.addWidget(self.table, 1)
-        right.addWidget(row(self.b_delete, self.b_row_del, None, self.b_save))
+        right.addWidget(row(self.b_delete, self.b_row_del, self.b_find, None, self.b_save))
 
         lay = QHBoxLayout(self)
         lay.setSpacing(14)
@@ -176,6 +193,59 @@ class NamesDialog(QDialog):
         self.dirty = True
         self._fill()
 
+    # ------------------------------------------------------------ names found in the subtitles
+    def _find(self):
+        from ..config import settings
+        from ..translate import find_names
+        got = self.source() if self.source else None
+        if not got or not any(t.strip() for t in got[0]):
+            QMessageBox.information(self, "FreeSub", "Open a video that has subtitles first.")
+            return
+        try:
+            find_names.service()
+        except find_names.NoAI as e:
+            QMessageBox.information(self, "FreeSub", tr(str(e)))
+            return
+        lines, tr_lines, lang, self._video = got
+        target = settings()["target_lang"]
+        self.b_find.setEnabled(False)
+        self.b_find.setText(tr("Finding names…"))
+        sig = self._sig
+
+        def work():
+            try:
+                sig.done.emit(find_names.find(lines, tr_lines, lang, target), "")
+            except Exception as e:  # noqa: BLE001
+                log.warning("Finding names failed: %s", e)
+                sig.done.emit(None, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _found(self, found, error):
+        self.b_find.setEnabled(True)
+        self.b_find.setText(tr("Find names in the subtitles"))
+        if not self.isVisible():
+            return
+        if error:
+            QMessageBox.warning(self, "FreeSub", tr("Could not find the names: {a}").replace("{a}", error[:300]))
+            return
+        if not found:
+            QMessageBox.information(self, "FreeSub", "No names or special words were found.")
+            return
+        have = {a for a, _b in (self.cur["pairs"] if self.cur else [])}
+        dlg = FoundDialog(self, found, have)
+        if not dlg.exec():
+            return
+        picked = dlg.picked()
+        if not picked:
+            return
+        if self.cur is None:                              # no list yet: one named after the video
+            x = {"id": names.new_id(), "name": self._video or tr("New list"), "pairs": []}
+            self.work.append(x)
+            self._fill(x["id"])
+        self.cur["pairs"] = [p for p in self._rows()] + [[a, b] for a, b in picked if a not in have]
+        self.dirty = True
+        self._selected(self.list.currentItem(), None)
+
     # ------------------------------------------------------------ save / close
     def _save(self):
         if self.cur is not None:
@@ -191,3 +261,55 @@ class NamesDialog(QDialog):
                 != QMessageBox.Yes:
             return
         super().reject()
+
+
+class FoundDialog(QDialog):
+    """The names the AI found: tick the ones to add, fix the spelling or the translation if needed."""
+
+    def __init__(self, parent, found, have):
+        super().__init__(parent)
+        self.setWindowTitle("Names found in the subtitles")
+        self.resize(820, 520)
+        self.table = QTableWidget(len(found), 5)
+        self.table.setHorizontalHeaderLabels([tr("Original"), tr("Translation"), tr("Also heard as"), tr("Kind"),
+                                              tr("Times")])
+        h = self.table.horizontalHeader()
+        for c, mode in enumerate((QHeaderView.Stretch, QHeaderView.Stretch, QHeaderView.Stretch,
+                                  QHeaderView.ResizeToContents, QHeaderView.ResizeToContents)):
+            h.setSectionResizeMode(c, mode)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed |
+                                   QAbstractItemView.SelectedClicked)
+        for r, x in enumerate(found):
+            first = QTableWidgetItem(Keep(x["original"]))
+            first.setFlags(first.flags() | Qt.ItemIsUserCheckable)
+            old = x["original"] in have
+            first.setCheckState(Qt.Unchecked if old else Qt.Checked)
+            if old:
+                first.setToolTip(tr("Already in the list"))
+            self.table.setItem(r, 0, first)
+            self.table.setItem(r, 1, QTableWidgetItem(Keep(x["translation"])))
+            for c, text in ((2, ", ".join(x["seen"])), (3, tr(KIND_TEXT.get(x["kind"], "Term"))), (4, str(x["count"]))):
+                it = QTableWidgetItem(Keep(text))
+                it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(r, c, it)
+        b_all = button("Tick all", lambda: self._tick(True))
+        b_none = button("Untick all", lambda: self._tick(False))
+        b_add = button("Add to the list", self.accept, primary=True)
+        b_cancel = button("Cancel", self.reject)
+        lay = QVBoxLayout(self)
+        lay.setSpacing(8)
+        lay.addWidget(self.table, 1)
+        lay.addWidget(row(b_all, b_none, None, b_cancel, b_add))
+
+    def _tick(self, on):
+        for r in range(self.table.rowCount()):
+            self.table.item(r, 0).setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    def picked(self):
+        out = []
+        for r in range(self.table.rowCount()):
+            a = self.table.item(r, 0)
+            if a.checkState() == Qt.Checked and a.text().strip():
+                out.append([a.text().strip(), (self.table.item(r, 1).text() if self.table.item(r, 1) else "").strip()])
+        return out

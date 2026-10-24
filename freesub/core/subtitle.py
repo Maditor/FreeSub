@@ -1,4 +1,5 @@
 """Subtitle cues: read / write SRT, timestamps."""
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -99,6 +100,34 @@ def save_srt(cues: list[Cue], path: str):
     with open(tmp, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(to_srt(cues))
     os.replace(tmp, path)
+
+
+def slot_between(prev, nxt, length: float = 1.0, least: float = 0.2):
+    """(start, end) for a NEW line put between two lines (prev / nxt: a Cue, or None at the ends of the list).
+    It takes a short time in the gap between them (at most `length` s, in the middle of the gap), so the
+    order of the lines by time stays right. When the two lines touch there is no gap: the new line gets a short
+    slot (`least` s) at the join, overlapping the next line a little. The user changes the times if they want."""
+    def down(x):                                   # to 1/100 s, never above x (the order must not break)
+        return math.floor(x * 100 + 1e-9) / 100
+    lo = prev.end if prev is not None else None
+    hi = nxt.start if nxt is not None else None
+    if lo is None and hi is None:
+        s, e = 0.0, length
+    elif hi is None:                               # after the last line
+        s, e = lo, lo + length
+    elif lo is None:                               # before the first line
+        e = hi
+        s = max(0.0, hi - length)
+        if e - s < least:
+            s, e = 0.0, least
+    elif hi - lo >= least:                         # room in the gap
+        d = min(hi - lo, length)
+        s = lo + (hi - lo - d) / 2
+        e = s + d
+    else:                                          # touching lines
+        s = max(prev.start, min(lo, hi))
+        e = s + least
+    return down(s), down(e)
 
 
 def cue_at(cues: list[Cue], t: float) -> int:

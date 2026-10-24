@@ -17,16 +17,16 @@ UA = {"User-Agent": "FreeSub"}
 
 # name -> (Hugging Face repo, approx. size, note shown in the menu, only language or None)
 WHISPER = {
-    "tiny": ("Systran/faster-whisper-tiny", "75 MB", "fastest, rough", None),
-    "base": ("Systran/faster-whisper-base", "145 MB", "fast, rough", None),
-    "small": ("Systran/faster-whisper-small", "485 MB", "good on CPU", None),
-    "medium": ("Systran/faster-whisper-medium", "1.5 GB", "accurate, slow", None),
-    "large-v3-turbo": ("mobiuslabsgmbh/faster-whisper-large-v3-turbo", "1.6 GB", "best speed / quality on GPU", None),
+    "large-v3-turbo": ("mobiuslabsgmbh/faster-whisper-large-v3-turbo", "1.6 GB", "fast, a little less accurate", None),
     "large-v3": ("Systran/faster-whisper-large-v3", "3.1 GB", "most accurate, slower", None),
     "distil-large-v3": ("Systran/faster-distil-whisper-large-v3", "1.5 GB", "English only, fast", "en"),
     "kotoba-whisper-v2.0": ("kotoba-tech/kotoba-whisper-v2.0-faster", "1.5 GB", "Japanese only, fast + accurate", "ja"),
-    "phowhisper-large": ("kiendt/PhoWhisper-large-ct2", "3.1 GB", "Vietnamese only, most accurate", "vi"),
+    # BELLE-2 Chinese fine-tunes of Whisper (Apache-2.0), community CTranslate2 conversions
+    "belle-large-v3-zh": ("k1nto/Belle-whisper-large-v3-zh-punct-ct2", "3.1 GB",
+                          "Chinese only, most accurate, with punctuation", "zh"),
+    "belle-large-v3-turbo-zh": ("flateon/Belle-whisper-large-v3-turbo-zh-ct2", "1.6 GB", "Chinese only, fast, a little less accurate", "zh"),
 }
+DEFAULT = "large-v3-turbo"
 WHISPER_REQUIRED = ("config.json", "model.bin")
 WHISPER_OPTIONAL = ("tokenizer.json", "vocabulary.txt", "vocabulary.json", "preprocessor_config.json")
 # models converted without tokenizer.json use the standard multilingual Whisper tokenizer
@@ -39,6 +39,17 @@ def whisper_lang(name: str):
 
 def whisper_dir(name: str) -> str:
     return os.path.join(models_dir(), "whisper", name)
+
+
+def for_language(lang: str | None) -> list[str]:
+    """The models offered in Steps for the spoken language: the ones for every language, and the ones made
+    only for that language (none of those for Auto detect)."""
+    return [n for n, v in WHISPER.items() if v[3] is None or (lang and v[3] == lang)]
+
+
+def fit(name: str, lang: str | None) -> str:
+    """name if it is offered for that language, else the default model."""
+    return name if name in for_language(lang) else DEFAULT
 
 
 def whisper_ready(name: str) -> bool:

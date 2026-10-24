@@ -20,13 +20,50 @@ def setup():
                                               backupCount=3, encoding="utf-8")
     fh.setFormatter(fmt)
     root.addHandler(fh)
-    if sys.stderr is not None:          # windowed exe has no console
+    if sys.stderr is not None and getattr(sys.stderr, "name", "") not in (os.devnull,) and \
+            not str(getattr(sys.stderr, "name", "")).endswith("startup.txt"):      # a real console only
         ch = logging.StreamHandler()
         ch.setFormatter(fmt)
         root.addHandler(ch)
     for noisy in ("urllib3", "faster_whisper", "httpx", "huggingface_hub"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    _catch_crashes()
     return os.path.join(folder, "freesub.log")
+
+
+def _catch_crashes():
+    """An error nobody caught (on the window's thread or a work thread) goes into the log: with no console
+    window (run.bat / the exe) it would otherwise be lost."""
+    import threading
+    old = sys.excepthook
+
+    def hook(kind, value, tb):
+        if not issubclass(kind, KeyboardInterrupt):
+            log.critical("Unexpected error", exc_info=(kind, value, tb))
+        old(kind, value, tb)
+
+    def thread_hook(a):
+        if a.exc_type is not SystemExit:
+            log.critical("Unexpected error in %s", getattr(a.thread, "name", "a thread"),
+                         exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
+    sys.excepthook = hook
+    threading.excepthook = thread_hook
+
+
+def no_console_output():
+    """Started without a console (pythonw / the exe): print() and libraries writing to the console (download
+    bars) need somewhere to write. It goes to logs\\startup.txt, which also keeps an error that happens before
+    the log is set up."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        f = open(os.path.join(logs_dir(), "startup.txt"), "w", encoding="utf-8", buffering=1)
+    except OSError:
+        f = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = f
+    if sys.stderr is None:
+        sys.stderr = f
 
 
 @contextlib.contextmanager

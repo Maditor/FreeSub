@@ -1,5 +1,5 @@
 """Small shared widgets."""
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QToolButton, QVBoxLayout,
                                QWidget)
@@ -124,6 +124,28 @@ def section(text: str) -> QLabel:
     return lb
 
 
+def heading(text: str, upper: bool = False) -> QWidget:
+    """The heading of a group of options: accent coloured, with a thin line running on to the right edge, so
+    where a group starts is plain at a glance. Room above it, close to its own options below
+    (theme.py: #GroupTitle, #GroupLine)."""
+    from ..i18n import tr
+    w = QWidget()
+    w.setObjectName("Group")
+    lay = QHBoxLayout(w)
+    lay.setContentsMargins(0, 10, 0, 0)
+    lay.setSpacing(8)
+    lb = QLabel(tr(text).upper() if upper else tr(text))
+    lb.setObjectName("GroupTitle")
+    line = QFrame()
+    line.setObjectName("GroupLine")
+    line.setFixedHeight(1)
+    line.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    lay.addWidget(lb)
+    lay.addWidget(line, 1, Qt.AlignVCenter)
+    w.title = lb
+    return w
+
+
 def row(*widgets, spacing=8, stretch_last=False) -> QWidget:
     w = QWidget()
     lay = QHBoxLayout(w)
@@ -138,6 +160,117 @@ def row(*widgets, spacing=8, stretch_last=False) -> QWidget:
             lay.addWidget(x)
     if stretch_last:
         lay.addStretch(1)
+    return w
+
+
+class _TickRow(QWidget):
+    """A tick row: the whole row is the click target (text, the space between, the box), and a faint dotted
+    line runs from the end of the text to the box, so it is plain which box belongs to which text. Under the
+    mouse the line and the text light up."""
+
+    def __init__(self, box, text):
+        super().__init__()
+        self.box, self.text = box, text
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setCursor(Qt.PointingHandCursor)
+        self._hot = False
+
+    def event(self, e):
+        t = e.type()
+        if t in (QEvent.HoverEnter, QEvent.HoverLeave):
+            self._hot = t == QEvent.HoverEnter and self.box.isEnabled()
+            self.text.setProperty("hot", self._hot)
+            self.text.style().unpolish(self.text)
+            self.text.style().polish(self.text)
+            self.update()
+        return super().event(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.box.isEnabled():
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.box.isEnabled() and self.rect().contains(e.position().toPoint()):
+            self.box.toggle()
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def paintEvent(self, e):
+        from PySide6.QtGui import QPainter, QPen
+        from . import theme
+        fm = self.text.fontMetrics()
+        if fm.horizontalAdvance(self.text.text()) > self.text.width():      # two lines of text: no line
+            return
+        x0 = self.text.x() + fm.horizontalAdvance(self.text.text()) + 8
+        x1 = self.box.x() - 8
+        if x1 - x0 < 12:
+            return
+        c = theme.colors()
+        col = QColor(c["accent"] if self._hot else c["border"])
+        if not self.box.isEnabled():
+            col = QColor(c["border"])
+        p = QPainter(self)
+        pen = QPen(col, 1, Qt.DotLine)
+        p.setPen(pen)
+        y = self.box.y() + self.box.height() // 2 + 1
+        p.drawLine(x0, y, x1, y)
+        p.end()
+
+
+class _TickFollow(QObject):
+    """The row follows its box: greyed out with it, hidden when the box is hidden on purpose."""
+
+    def __init__(self, box, row_, text):
+        super().__init__(box)
+        self.row, self.text = row_, text
+
+    def eventFilter(self, obj, e):
+        t = e.type()
+        if t == QEvent.EnabledChange:
+            self.text.setEnabled(obj.isEnabled())
+            self.row.setCursor(Qt.PointingHandCursor if obj.isEnabled() else Qt.ArrowCursor)
+            self.row.update()
+        elif t == QEvent.HideToParent:
+            self.row.hide()
+        elif t == QEvent.ShowToParent:
+            self.row.show()
+        elif t == QEvent.ToolTipChange:
+            self.text.setToolTip(obj.toolTip())
+            self.row.setToolTip(obj.toolTip())
+        return False
+
+
+def tick_row(box, muted=False) -> QWidget:
+    """A check box as a row like form_row: its text on the left (lined up with the other labels), the box on
+    the far right (lined up with the drop-down boxes), a dotted line between them; a click anywhere on the
+    row ticks it. The box object stays the one to use (checked, toggled, tooltip): only where it is drawn
+    changes. muted: the text looks like the panel's muted labels."""
+    text = QLabel(box.text())
+    text.setObjectName("TickText")
+    text.setWordWrap(True)
+    text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+    text.setAttribute(Qt.WA_TransparentForMouseEvents, True)      # the row takes the clicks
+    text.setToolTip(box.toolTip())
+    if muted:                                     # in a panel whose labels are muted (Style)
+        text.setProperty("muted", True)
+    box.setText("")
+    box.setObjectName("TickBox")                  # no text: no gap after the box (theme.py), flush right
+    box.setFixedSize(20, 20)
+    w = _TickRow(box, text)
+    w.setToolTip(box.toolTip())
+    lay = QHBoxLayout(w)
+    lay.setContentsMargins(0, 2, 0, 2)
+    lay.setSpacing(8)
+    lay.addWidget(text, 1)
+    lay.addWidget(box, 0, Qt.AlignRight | Qt.AlignVCenter)
+    text.setEnabled(box.isEnabled())
+    if box.isHidden() and box.testAttribute(Qt.WA_WState_ExplicitShowHide):
+        w.hide()
+    box.installEventFilter(_TickFollow(box, w, text))
+    w.text = text
     return w
 
 
@@ -243,8 +376,6 @@ class Card(QFrame):
         self.icon = QLabel()
         self.title = QLabel(title)
         self.title.setObjectName("CardTitle")
-        self.summary = QLabel("")
-        self.summary.setProperty("muted", True)
         self.switch = Switch(checked) if switch else None
         self.fold = QToolButton()
         self.fold.setCheckable(True)
@@ -255,7 +386,7 @@ class Card(QFrame):
         self.fold.setStyleSheet("QToolButton:checked { background: transparent; }")
         head.addWidget(self.icon)
         head.addWidget(self.title)
-        head.addWidget(self.summary, 1)
+        head.addStretch(1)                       # the title only: no summary text next to it
         head.addWidget(self.fold)
         if self.switch:
             head.addWidget(self.switch)
@@ -294,9 +425,6 @@ class Card(QFrame):
         self.refresh_icon()
         if emit:
             self.toggled.emit(on)
-
-    def set_summary(self, text: str):
-        self.summary.setText(text)
 
 
 class _SegRing(QWidget):
@@ -480,7 +608,8 @@ def confirm(parent, text: str, key: str = "", yes: str = "", danger: bool = Fals
     skip = list(settings().get("confirm_skip") or [])
     if key and (key in skip or "*" in skip):
         return True
-    box = QMessageBox(QMessageBox.Question, "FreeSub", text, QMessageBox.Yes | QMessageBox.No, parent)
+    from ..i18n import tr
+    box = QMessageBox(QMessageBox.Question, "FreeSub", tr(text), QMessageBox.Yes | QMessageBox.No, parent)
     if yes:
         box.button(QMessageBox.Yes).setText(yes)
     box.setDefaultButton(QMessageBox.No if danger else QMessageBox.Yes)

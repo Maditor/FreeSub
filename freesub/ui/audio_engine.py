@@ -122,6 +122,19 @@ class AudioEngine(QObject):
                 pass
         self.io = None
 
+    def reset(self):
+        """Stop and drop the sound card stream: the next play() opens a new one. After a long run (an export)
+        the old stream could stay silent on Windows until the mic was switched off and on."""
+        self.stop()
+        if self.sink is not None:
+            try:
+                self.sink.deleteLater()
+            except Exception:  # noqa: BLE001
+                pass
+        self.sink, self.io = None, None
+        self._playing = False
+        self.failed = False
+
     def active(self) -> bool:
         return self.source is not None and self.timer.isActive()
 

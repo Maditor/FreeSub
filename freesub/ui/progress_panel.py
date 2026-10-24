@@ -1,6 +1,7 @@
-"""What is running, small, in the command bar: which video (1/3), a thin progress bar, elapsed / left,
-Pause / Stop, and the log (in a window of its own). The video's name and the step are in the tooltip (and the
-log). Hidden bits while nothing runs."""
+"""What is running, at the bottom of the media column: ONE progress bar for the whole run (every step of every
+video, it only goes forward and is full when everything is done), which video (1/3), elapsed / left, and the log
+button (the log has a window of its own). The video's name and the step are in the tooltip (and the log).
+Stopping is the Run button (it becomes Stop while working); there is no pause."""
 import os
 
 from PySide6.QtCore import Qt, QTimer
@@ -54,11 +55,13 @@ class ProgressPanel(QFrame):
         super().__init__()
         self.runner = runner
         self.chips = {}
-        self.frac = 0.0
+        self.frac = 0.0                 # the whole run, 0..1 (what the bar shows; never goes back)
+        self.step_frac = 0.0            # the step running now
+        self.n_videos, self.video_i, self.step_i = 1, 0, 0
 
         self.title = QLabel("")
         self.title.setStyleSheet("font-weight: 600;")
-        self.title.setMaximumWidth(200)
+        self.title.setMaximumWidth(120)
         self._tip = ["", ""]                          # video, what it is doing: the tooltip
         self.chip_row = QHBoxLayout()
         self.chip_row.setSpacing(10)
@@ -66,35 +69,32 @@ class ProgressPanel(QFrame):
         self.bar.setRange(0, 1000)
         self.bar.setValue(0)
         self.bar.setFixedHeight(4)
-        self.bar.setFixedWidth(110)
         self.text = QLabel("")
         self.text.setProperty("muted", True)
         self.text.setMinimumWidth(60)
-        self.text.setMaximumWidth(260)
+        self.text.setWordWrap(True)
         from PySide6.QtWidgets import QSizePolicy
-        self.text.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)     # long messages never widen the window
+        self.text.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)     # long messages never widen the column
         self.clock = QLabel("")
         self.clock.setProperty("muted", True)
-        self.b_pause = IconButton("pause", "Pause")
-        self.b_stop = IconButton("stop", "Stop")
         self.b_log = IconButton("log", "Show / hide the log", checkable=True)
-        self.b_pause.setEnabled(False)
-        self.b_stop.setEnabled(False)
 
-        # one small row in the command bar: video · what it is doing · bar · time · buttons
-        top = QHBoxLayout(self)
-        top.setContentsMargins(0, 0, 8, 0)
-        top.setSpacing(8)
+        # bottom of the media column: the bar over the whole width, then 1/3 · time ... log button, then a message
+        col = QVBoxLayout(self)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(6)
         self.chip_box = QWidget()                      # the step chips are kept (not shown: no room)
         self.chip_box.setLayout(self.chip_row)
         self.chip_box.setVisible(False)
-        top.addWidget(self.title)
-        top.addWidget(self.text)
-        top.addWidget(self.bar)
-        top.addWidget(self.clock)
-        top.addWidget(self.b_pause)
-        top.addWidget(self.b_stop)
-        top.addWidget(self.b_log)
+        col.addWidget(self.bar)
+        line = QHBoxLayout()
+        line.setSpacing(8)
+        line.addWidget(self.title)
+        line.addWidget(self.clock)
+        line.addStretch(1)
+        line.addWidget(self.b_log)
+        col.addLayout(line)
+        col.addWidget(self.text)
 
         self.log_window = QWidget(None, Qt.Tool)       # the log: a window of its own, shown when wanted
         self.log_window.setWindowTitle("Log")
@@ -109,8 +109,6 @@ class ProgressPanel(QFrame):
         self.log_window.installEventFilter(self)
         self._idle(True)
 
-        self.b_pause.clicked.connect(self._pause)
-        self.b_stop.clicked.connect(runner.stop)
         self.b_log.toggled.connect(self._toggle_log)
         runner.started.connect(self._started)
         runner.progress.connect(self._progress)
@@ -118,7 +116,6 @@ class ProgressPanel(QFrame):
         runner.step.connect(self._step)
         runner.video_started.connect(self._video)
         runner.finished.connect(self._finished)
-        runner.paused_changed.connect(self._paused)
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self._tick)
@@ -128,7 +125,7 @@ class ProgressPanel(QFrame):
         self.clear_timer.timeout.connect(self.reset)
 
     def _idle(self, idle: bool):
-        for w in (self.bar, self.clock, self.b_pause, self.b_stop):
+        for w in (self.bar, self.clock):
             w.setVisible(not idle)
         self.title.setVisible(not idle and bool(self.title.text()))
         self.text.setVisible(False)                   # while it runs: only 1/3, the bar and the time
@@ -218,14 +215,15 @@ class ProgressPanel(QFrame):
         self.text.setText("")
         self.bar.setRange(0, 1000)
         self.bar.setValue(0)
-        self.frac = 0.0
-        self.b_pause.setEnabled(True)
-        self.b_stop.setEnabled(True)
+        self.frac = self.step_frac = 0.0
+        self.n_videos, self.video_i, self.step_i = 1, 0, 0
         self.timer.start()
         self._tick()
 
     def _video(self, video, i, n):
         name = os.path.basename(video)
+        self.n_videos, self.video_i, self.step_i, self.step_frac = max(1, n), i, 0, 0.0
+        self._show()
         self._set_title(f"{i + 1}/{n}" if n > 1 else "")
         self._set_tip(video=f"{i + 1}/{n} · {name}" if n > 1 else name)
         for sid in self.chips:
@@ -237,21 +235,32 @@ class ProgressPanel(QFrame):
             self.chip_row.addWidget(chip)
             self.chips[sid] = chip
         self._set_chip(sid, state)
+        order = list(self.chips)
         if state == "start":
-            self.frac = 0.0
-            self.bar.setValue(0)
+            self.step_i = order.index(sid) if sid in order else self.step_i
+            self.step_frac = 0.0
+            self._show()
             self._set_tip(doing=STEPS[sid][0] + "…" if sid in STEPS else text)
+        elif state == "done" and sid in order:
+            self.step_i, self.step_frac = order.index(sid), 1.0
+            self._show()
         elif state == "failed":
             self._set_tip(doing=text)
 
+    def overall(self) -> float:
+        """Where the whole run is: the videos done, then the steps of this video done, then this step."""
+        n_steps = max(1, len(self.chips))
+        video = min(1.0, (self.step_i + max(0.0, min(1.0, self.step_frac))) / n_steps)
+        return min(1.0, (self.video_i + video) / self.n_videos)
+
+    def _show(self):
+        self.frac = max(self.frac, self.overall())       # one bar: it never starts again for the next step
+        self.bar.setValue(int(self.frac * 1000))
+
     def _progress(self, frac, text):
-        if frac < 0:
-            self.bar.setRange(0, 0)        # busy animation
-        else:
-            if self.bar.maximum() == 0:
-                self.bar.setRange(0, 1000)
-            self.bar.setValue(int(frac * 1000))
-            self.frac = frac
+        if frac is not None and frac >= 0:              # unknown (-1 / None): the bar just stays where it is
+            self.step_frac = frac
+            self._show()
         if text:
             self._set_tip(doing=text)
 
@@ -262,26 +271,13 @@ class ProgressPanel(QFrame):
         eta = fmt_eta(w.elapsed, self.frac) if self.frac < 1 else ""
         self.clock.setText(fmt_secs(w.elapsed) + (f"  ·  {eta}" if eta else ""))
 
-    def _paused(self, on):
-        self.b_pause.set_icon("play" if on else "pause")
-        self.b_pause.setToolTip("Resume" if on else "Pause")
-        self._set_tip(doing="Paused" if on else "")
-
-    def _pause(self):
-        if self.runner.control and self.runner.control.paused:
-            self.runner.resume()
-        else:
-            self.runner.pause()
-
     def _finished(self, result, msg):
         self.timer.stop()
         self._tick()
-        self.b_pause.setEnabled(False)
-        self.b_stop.setEnabled(False)
-        self.b_pause.set_icon("pause")
         if self.bar.maximum() == 0:
             self.bar.setRange(0, 1000)
         if result == "done":
+            self.frac = 1.0
             self.bar.setValue(1000)
         self._set_title({"done": "Done", "stopped": "Stopped", "failed": "Failed"}.get(result, result))
         self._set_tip(doing=msg)

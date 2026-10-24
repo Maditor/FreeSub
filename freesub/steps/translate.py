@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 
 from ..config import settings
 from ..core.jobs import Cancelled
@@ -120,6 +121,10 @@ def run(project: Project, control, force=False) -> str:
             save_partial()
             project.mark("translate", "failed", params=params, error=str(e)[:300])
             raise
+        from .hallucination import strip_dashes
+        # dialogue dashes ("- Ăn được không?") only when the original line has them itself
+        out = [t if (c.text or "").lstrip().startswith(("-", "–", "—")) else strip_dashes(t)
+               for c, t in zip(cues, out)]
         result = [Cue(c.start, c.end, wrap(t or c.text, target)) for c, t in zip(cues, out)]
         save_srt(result, project.tr_srt)
         used = project.meta.get("_used_services", [])
@@ -162,7 +167,7 @@ def _translate(project, control, cues, texts, out, src, target, save_partial):
             control.progress(i / n, f"Translating {i}/{n} lines · {svc.capitalize()}")
             try:
                 if svc == "google":
-                    got = _google(block, src, target, pairs)
+                    got = _google(block, src, target, pairs, [cues[k] for k in idx], [genders[k] for k in idx])
                 else:
                     before = [(texts[k], out[k]) for k in range(max(0, i - CONTEXT_BEFORE), i) if out[k]]
                     after = texts[idx[-1] + 1: idx[-1] + 1 + CONTEXT_AFTER]
@@ -185,15 +190,133 @@ def _translate(project, control, cues, texts, out, src, target, save_partial):
     project.meta["_used_services"] = used
 
 
-def _google(lines, src, target, pairs):
+JOIN_GAP = 0.6       # Google: lines this close, the first without a sentence end, are one sentence ...
+JOIN_LINES = 4       # ... of at most this many lines
+CLAUSE = (",", "，", "、", ";", "；", ":", "：", "-", "–", "—")
+
+
+def sentence_groups(cues, texts, genders=None):
+    """Lines that are one sentence (\"I think that\" + \"we should go now.\"): lists of indexes."""
+    groups, cur = [], []
+    for k, t in enumerate(texts):
+        if cur:
+            p = cur[-1]
+            other = genders and genders[p] and genders[k] and genders[p] != genders[k]
+            if (not texts[p].strip() or not t.strip() or texts[p].rstrip().endswith(SENT_END) or other
+                    or cues[k].start - cues[p].end > JOIN_GAP or len(cur) >= JOIN_LINES):
+                groups.append(cur)
+                cur = []
+        cur.append(k)
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def share(text, sizes, lang):
+    """Spread one translated sentence back over its lines, in order, each getting a part as long as its
+    original line's share (a comma near the place is a better cut). None when it can not be shared."""
+    from ..langs import NO_SPACE
+    chars = lang in NO_SPACE
+    toks = list(text.replace(" ", "")) if chars else text.split()
+    n = len(sizes)
+    if len(toks) < n:
+        return None
+    total = float(sum(sizes)) or 1.0
+    cuts, acc, last = [], 0.0, 0
+    for k in range(n - 1):
+        acc += sizes[k]
+        want = round(acc / total * len(toks))
+        lo, hi = last + 1, len(toks) - (n - 1 - k)            # every line keeps at least one word
+        want = max(lo, min(hi, want))
+        best = want
+        for d in (0, -1, 1, -2, 2):                            # a comma close by
+            j = want + d
+            if lo <= j <= hi and toks[j - 1].endswith(CLAUSE):
+                best = j
+                break
+        cuts.append(best)
+        last = best
+    parts, a = [], 0
+    for b in cuts + [len(toks)]:
+        parts.append(("" if chars else " ").join(toks[a:b]))
+        a = b
+    return parts
+
+
+def _google(lines, src, target, pairs, cues=None, genders=None):
     if pairs:                                   # names / terms are put in before Google sees the line
-        fixed = []
-        for l in lines:
-            for a, b in pairs:
-                l = l.replace(a, b)
-            fixed.append(l)
-        lines = fixed
-    return google.translate(lines, src if src != "auto" else "auto", target)
+        lines = [put_names(l, pairs) for l in lines]
+    out = _google_lines(lines, src, target, cues, genders)
+    return [spaced_names(t, pairs) for t in out] if pairs else out
+
+
+def put_names(line: str, pairs) -> str:
+    """The names / terms of the list put into a line in place of the originals. Next to a letter or a digit
+    (Chinese / Japanese have no spaces: 可兑换积分100) the translation gets a space on each side, or Google
+    glues it to its neighbours ('tích phân100')."""
+    for a, b in pairs:
+        if a not in line:
+            continue
+        parts = line.split(a)
+        out = parts[0]
+        for nxt in parts[1:]:
+            left = " " if out and not out[-1].isspace() and _glues(out[-1], b[:1]) else ""
+            right = " " if nxt and not nxt[0].isspace() and _glues(b[-1:], nxt[0]) else ""
+            out += left + b + right + nxt
+        line = out
+    return line
+
+
+def _glues(x: str, y: str) -> bool:
+    """Two characters that would read as one word if put side by side: both letters / digits and not of
+    the same script (a Chinese character next to a Latin letter), or a digit next to a letter."""
+    if not (x.isalnum() and y.isalnum()):
+        return False
+    if x.isdigit() != y.isdigit():
+        return True
+    return _cjk(x) != _cjk(y)
+
+
+def _cjk(c: str) -> bool:
+    return "\u2e80" <= c <= "\u9fff" or "\uac00" <= c <= "\ud7af" or "\uf900" <= c <= "\ufaff"
+
+
+def spaced_names(text: str, pairs) -> str:
+    """A name / term of the list glued to a number in the translation ('tích phân100', '20tích phân')
+    gets its space back."""
+    for _a, b in pairs:
+        if b and b in text:
+            e = re.escape(b)
+            if b[-1:].isalpha():
+                text = re.sub(e + r"(?=\d)", lambda m: m.group(0) + " ", text)
+            if b[:1].isalpha():
+                text = re.sub(r"(?<=\d)" + e, lambda m: " " + m.group(0), text)
+    return text
+
+
+def _google_lines(lines, src, target, cues=None, genders=None):
+    sl = src if src != "auto" else "auto"
+    if not cues or len(cues) != len(lines):
+        return google.translate(lines, sl, target)
+    # a sentence over a few lines is translated whole (a few words alone come back wrong), then shared
+    from ..langs import NO_SPACE
+    from .transcribe import size_of
+    groups = sentence_groups(cues, lines, genders)
+    joined = [("" if src in NO_SPACE else " ").join(lines[k].strip() for k in g) for g in groups]
+    got = google.translate(joined, sl, target)
+    out = [""] * len(lines)
+    alone = []
+    for g, t in zip(groups, got):
+        parts = [t] if len(g) == 1 else share(t, [max(1, size_of(lines[k], src)) for k in g], target)
+        if parts is None or not t.strip():
+            alone += g
+            continue
+        for k, p in zip(g, parts):
+            out[k] = p
+    if alone:                                   # too short to share: line by line, as before
+        for k, t in zip(alone, google.translate([lines[k] for k in alone], sl, target)):
+            out[k] = t
+    return out
 
 
 def _ask(client, text, block, control):

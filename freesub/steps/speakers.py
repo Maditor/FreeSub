@@ -233,7 +233,10 @@ def can_cut(words, i, pause=0.2) -> bool:
     return prev.endswith(SENTENCE_END) or words[i][0] - words[i - 1][1] >= pause
 
 
-def split_by_speaker(cues, word_labels, join, min_part=0.6):
+TURN_PAUSE = 0.5      # a turn without a sentence end needs at least this pause (0.2 cut "I think | that ...")
+
+
+def split_by_speaker(cues, word_labels, join, min_part=1.0):
     """cues: [{"s","e","t","w":[(s,e,text),...]}]; word_labels: one list per cue. Returns new cue dicts, cut
     where the speaker changes (only where a cut is allowed, see can_cut), each with "spk"."""
     out = []
@@ -253,9 +256,9 @@ def split_by_speaker(cues, word_labels, join, min_part=0.6):
         for r in runs[1:]:
             r = list(r)
             prev = fixed[-1]
-            if not can_cut(words, r[1]):
-                ahead = next((j for j in range(r[1] + 1, r[2] + 1) if can_cut(words, j)), None)
-                back = next((j for j in range(r[1] - 1, prev[1], -1) if can_cut(words, j)), None)
+            if not can_cut(words, r[1], TURN_PAUSE):
+                ahead = next((j for j in range(r[1] + 1, r[2] + 1) if can_cut(words, j, TURN_PAUSE)), None)
+                back = next((j for j in range(r[1] - 1, prev[1], -1) if can_cut(words, j, TURN_PAUSE)), None)
                 if ahead is not None and (back is None or ahead - r[1] <= r[1] - back):
                     prev[2], r[1] = ahead - 1, ahead
                 elif back is not None:
@@ -279,8 +282,10 @@ def split_by_speaker(cues, word_labels, join, min_part=0.6):
             changed = False
             for j, (l, a, b) in enumerate(runs):
                 # a short reply that is a whole sentence ("No.", "Yes!") is a real turn: it stays
-                whole = (a == 0 or can_cut(words, a)) and (b == len(words) - 1 or can_cut(words, b + 1))
-                if words[b][1] - words[a][0] < min_part and not whole:
+                whole = (a == 0 or can_cut(words, a, TURN_PAUSE)) and \
+                    (b == len(words) - 1 or can_cut(words, b + 1, TURN_PAUSE))
+                short = words[b][1] - words[a][0] < min_part or b - a + 1 < 2
+                if short and not whole:
                     k = j - 1 if j > 0 else j + 1
                     lo, hi = min(runs[k][1], a), max(runs[k][2], b)
                     runs[k] = [runs[k][0], lo, hi]

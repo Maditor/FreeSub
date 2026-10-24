@@ -10,12 +10,14 @@ import re
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import (QAbstractSpinBox, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QGridLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractSpinBox, QColorDialog, QComboBox, QDoubleSpinBox, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from ..config import settings
 from ..i18n import tr
-from .widgets import Card, IconButton, button, section, wait_cursor
+from . import icons
+from .widgets import Card, IconButton, Switch, button, section, wait_cursor
 
 OUTLINES = [("none", "None"), ("thin", "Thin"), ("normal", "Medium"), ("thick", "Thick")]
 SWATCHES = ["#ffffff", "#ffe14d", "#ffd08a", "#b8f5d0", "#9fd8ff", "#ffc2d6", "#000000", "#1b1b1b"]
@@ -58,8 +60,15 @@ def _swatch(hex_color: str, size=18) -> QIcon:
     return QIcon(pm)
 
 
+class _Num(QDoubleSpinBox):
+    """A number with decimals shown short: 6 and 6.5 (not 6.0)."""
+
+    def textFromValue(self, v):
+        return f"{v:.{self.decimals()}f}".rstrip("0").rstrip(".")
+
+
 def _spin(lo, hi, value, step=1, suffix="", dec=None, tip="", width=72):
-    w = QDoubleSpinBox() if dec is not None else QSpinBox()
+    w = _Num() if dec is not None else QSpinBox()
     if dec is not None:
         w.setDecimals(dec)
     w.setRange(lo, hi)
@@ -69,6 +78,7 @@ def _spin(lo, hi, value, step=1, suffix="", dec=None, tip="", width=72):
     w.setToolTip(tip)
     w.setAlignment(Qt.AlignCenter)
     w.setButtonSymbols(QAbstractSpinBox.NoButtons)   # type a number or use the arrow keys: narrow and clean
+    w.setProperty("bare", True)                     # theme.py: no room kept for the buttons (else the text has 1 px)
     w.setFixedWidth(width)
     return w
 
@@ -117,6 +127,105 @@ def _card_body(layout) -> QWidget:
     return w
 
 
+FIELD_W = 124                    # px: the width of the controls on the right of the rows
+
+
+class UnitField(QFrame):
+    """A number with its unit inside the same field ('36 px', '20 từ / dòng'): the number on the right in the
+    text colour, the unit after it in the muted colour (theme.py: #UnitField)."""
+
+    def __init__(self, spin, unit: str, width=FIELD_W):
+        super().__init__()
+        self.setObjectName("UnitField")
+        self.spin = spin
+        spin.setMinimumWidth(24)
+        spin.setMaximumWidth(16777215)
+        spin.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        spin.setFrame(False)
+        self.unit = QLabel(unit)
+        self.unit.setObjectName("UnitText")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 0, 10, 0)
+        lay.setSpacing(6)
+        lay.addWidget(spin, 1)
+        lay.addWidget(self.unit)
+        self.setFixedSize(width, 34)
+        self.setToolTip(spin.toolTip())
+        self.unit.setToolTip(spin.toolTip())
+
+
+class _IconTextButton(QPushButton):
+    """A button with one of FreeSub's icons and a text ('Choose area')."""
+
+    def __init__(self, icon_key: str, text: str):
+        super().__init__(text)
+        self.key = icon_key
+        self.setCursor(Qt.PointingHandCursor)
+        self.setIconSize(QSize(16, 16))
+        icons.track(self)
+        self.refresh_icon()
+
+    def refresh_icon(self):
+        self.setIcon(icons.icon(self.key, 16))
+
+
+class _PickerButton(QPushButton):
+    """Looks like the drop-down boxes (text on the left, the arrow on the right) but opens a popup."""
+
+    def __init__(self, on_click):
+        super().__init__("")
+        self.setCursor(Qt.PointingHandCursor)
+        self.clicked.connect(on_click)
+        self.arrow = QLabel(self)
+        self.arrow.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setMinimumHeight(34)
+        icons.track(self)
+        self.refresh_icon()
+
+    def refresh_icon(self):
+        from . import theme
+        self.arrow.setPixmap(icons.pixmap("chevron_down", theme.colors()["fg"], 12))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.arrow.setGeometry(self.width() - 26, (self.height() - 12) // 2, 12, 12)
+
+
+def _row(name: str, *widgets, tip: str = "") -> QHBoxLayout:
+    """One setting: its name on the left, its controls together on the right."""
+    h = QHBoxLayout()
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(8)
+    lb = QLabel(name)
+    lb.setObjectName("StyleName")
+    if tip:
+        lb.setToolTip(tip)
+    h.addWidget(lb)
+    h.addStretch(1)
+    for w in widgets:
+        h.addWidget(w)
+    return h
+
+
+def _rows(*rows) -> QVBoxLayout:
+    v = QVBoxLayout()
+    v.setContentsMargins(2, 8, 2, 2)
+    v.setSpacing(12)
+    for r in rows:
+        if isinstance(r, QWidget):
+            v.addWidget(r)
+        else:
+            v.addLayout(r)
+    return v
+
+
+def _divider() -> QFrame:
+    line = QFrame()
+    line.setObjectName("StyleDivider")
+    line.setFixedHeight(1)
+    return line
+
+
 class ColorField(QWidget):
     """A colour: the swatch (opens the palette) and its code (#RRGGBB), typed or pasted."""
     changed = Signal(str)
@@ -126,23 +235,23 @@ class ColorField(QWidget):
         self.title = title
         self.value = _norm(value) or "#ffffff"
         self.swatch = QToolButton()
-        self.swatch.setFixedSize(32, 30)
+        self.swatch.setFixedSize(32, 32)
         self.swatch.setIconSize(QSize(18, 18))
         self.swatch.setCursor(Qt.PointingHandCursor)
         self.swatch.setToolTip("Choose a colour")
         self.swatch.clicked.connect(self._pick)
         self.code = QLineEdit()
         self.code.setMaxLength(7)
-        self.code.setFixedWidth(86)
+        self.code.setFixedWidth(88)
         self.code.setFont(QFont("Consolas"))
         self.code.setToolTip("Colour code, e.g. #FFFFFF")
         self.code.editingFinished.connect(self._typed)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
+        lay.setSpacing(8)
+        lay.addStretch(1)                         # on the right of its row, like the other controls
         lay.addWidget(self.swatch)
         lay.addWidget(self.code)
-        lay.addStretch(1)
         self._show()
 
     def set_value(self, value: str):
@@ -241,17 +350,18 @@ class StylePanel(QWidget):
         self.presets = Card("grid", "Presets", _card_body(pg), switch=False)
 
         # ---------------------------------------------------------------- text
-        self.font = button("", self._pick_font)
+        self.font = _PickerButton(self._pick_font)
         self.font.setToolTip("Font: choose from the fonts installed on this PC")
+        self.font.setMinimumWidth(170)
         self._font_button()
         self.size = _spin(8, 400, self._px(), 1, "", tip="Text height in pixels of this video (other videos keep "
-                          "the same proportion)", width=64)
+                          "the same proportion)")
         self.bold = QToolButton()
         self.bold.setText("B")
         self.bold.setCheckable(True)
         self.bold.setChecked(bool(s["sub_bold"]))
         self.bold.setToolTip("Bold")
-        self.bold.setFixedSize(32, 30)
+        self.bold.setFixedSize(34, 34)
         self.bold.setStyleSheet("QToolButton { font-weight: 700; }")
         self.color = ColorField(s["sub_color"], "Text colour")
         self.outline = QComboBox()
@@ -259,63 +369,60 @@ class StylePanel(QWidget):
             self.outline.addItem(t, k)
         self.outline.setCurrentIndex(max(0, self.outline.findData(s["sub_outline_size"])))
         self.outline.setToolTip("Outline around the letters")
+        self.outline.setFixedSize(FIELD_W, 34)
         self.outline_color = ColorField(s["sub_outline"], "Outline colour")
-        tg = _grid()
-        tg.addWidget(_name("Font"), 0, 0)
-        tg.addWidget(self.font, 0, 1)
-        tg.addWidget(_name("Text size"), 1, 0)
-        tg.addLayout(_hbox(self.size, _unit("px"), 6, self.bold, None), 1, 1)
-        tg.addWidget(_name("Colour"), 2, 0)
-        tg.addWidget(self.color, 2, 1)
-        tg.addWidget(_name("Outline"), 3, 0)
-        tg.addWidget(self.outline, 3, 1)
-        tg.addWidget(_name("Outline colour"), 4, 0)
-        tg.addWidget(self.outline_color, 4, 1)
+        font_row = QHBoxLayout()
+        font_row.setContentsMargins(0, 0, 0, 0)
+        font_row.setSpacing(12)
+        font_name = QLabel("Font")
+        font_name.setObjectName("StyleName")
+        font_row.addWidget(font_name)
+        font_row.addWidget(self.font, 1)                  # the font name needs the room
+        tg = _rows(font_row,
+                   _row("Text size", UnitField(self.size, "px"), self.bold),
+                   _row("Colour", self.color),
+                   _row("Outline", self.outline),
+                   _row("Outline colour", self.outline_color))
         self.text_card = Card("font", "Text", _card_body(tg), switch=False)
 
         # ---------------------------------------------------------------- layout
         self.words = _spin(3, 20, int(s["sub_max_words"]), 1, "", tip="Words on one line at most (Chinese, "
-                           "Japanese: twice as many characters). Used for new subtitles and the Fit button", width=60)
+                           "Japanese: twice as many characters). Used for new subtitles and the Fit button")
         self.lines = _spin(1, 3, int(s["sub_max_lines"]), 1, "", tip="Lines in one subtitle at most. 2 lets a "
-                           "long line break in two", width=60)
+                           "long line break in two")
         self.longest = _spin(2, 15, float(s["sub_max_duration"]), 0.5, "", 1,
                              "A subtitle stays on screen at most this long: longer speech becomes more "
-                             "subtitles (speech recognition)", 60)
+                             "subtitles (speech recognition)")
         self.b_center = button("Reset", self._center)
         self.b_center.setToolTip("Put the lines back in the middle near the bottom, and the box back on the "
                                  "area that was drawn")
-        lg = _grid()
-        lg.addWidget(_name("Words / line"), 0, 0)
-        lg.addLayout(_hbox(self.words, _name("Lines / subtitle"), self.lines, None, spacing=10), 0, 1)
-        lg.addWidget(_name("Longest on screen", self.longest.toolTip()), 1, 0)
-        lg.addLayout(_hbox(self.longest, _unit("s"), None), 1, 1)
-        lg.addWidget(_name("Position"), 2, 0)
-        lg.addLayout(_hbox(self.b_center, None), 2, 1)
+        self.b_center.setFixedSize(FIELD_W, 34)
+        lg = _rows(_row("Text density", UnitField(self.words, tr("words / line"), 118),
+                        UnitField(self.lines, tr("lines / subtitle"), 118)),
+                   _row("Longest on screen", UnitField(self.longest, tr("seconds")), tip=self.longest.toolTip()),
+                   _row("Position", self.b_center))
         self.layout_card = Card("wrap", "Layout", _card_body(lg), switch=False)
 
         # ---------------------------------------------------------------- box
-        self.b_draw = IconButton("area", "Draw the box on the video (OCR reads hard subtitles from this same area)")
+        self.b_draw = _IconTextButton("area", "Choose area")
+        self.b_draw.setToolTip("Draw the box on the video (OCR reads hard subtitles from this same area)")
+        self.b_draw.setFixedSize(FIELD_W, 34)
         self.b_draw.clicked.connect(self.area_requested.emit)
-        self.always = QCheckBox("Always")
+        self.always = Switch(bool(s["sub_box_always"]))
         self.always.setToolTip("Keep the box on screen the whole video, not only while a line is shown")
-        self.always.setChecked(bool(s["sub_box_always"]))
         self.box_color = ColorField(s["sub_box_color"], "Box colour")
         self.opacity = _spin(0, 100, int(s["ocr_box_opacity"]), 5, "", tip="How strongly the box colour "
-                             "covers the picture", width=60)
-        self.blur = _spin(0, 40, int(s["ocr_box_blur"]), 1, "", tip="How blurred the picture under the box is",
-                          width=60)
+                             "covers the picture")
+        self.blur = _spin(0, 40, int(s["ocr_box_blur"]), 1, "", tip="How blurred the picture under the box is")
         self.box_hint = _name("")
         self.box_hint.setWordWrap(True)
-        bg = _grid()
-        bg.addWidget(_name("Area"), 0, 0)
-        bg.addLayout(_hbox(self.b_draw, self.always, None), 0, 1)
-        bg.addWidget(_name("Colour"), 1, 0)
-        bg.addWidget(self.box_color, 1, 1)
-        bg.addWidget(_name("Opacity"), 2, 0)
-        bg.addLayout(_hbox(self.opacity, _unit("%"), None), 2, 1)
-        bg.addWidget(_name("Blur"), 3, 0)
-        bg.addLayout(_hbox(self.blur, _unit("px"), None), 3, 1)
         self.box_hint.setVisible(False)
+        bg = _rows(_row("Area", self.b_draw),
+                   _divider(),
+                   _row("Always show the box", self.always, tip=self.always.toolTip()),
+                   _row("Colour", self.box_color),
+                   _row("Opacity", UnitField(self.opacity, "%")),
+                   _row("Blur", UnitField(self.blur, "px")))
         self.box_card = Card("area", "Box", _card_body(bg), checked=bool(s["sub_box"]))
         self.box_card.setToolTip("Show the subtitles inside a box you draw on the video")
 
@@ -456,14 +563,9 @@ class StylePanel(QWidget):
         self._rows()
 
     def _rows(self):
-        s = self._s()
         on = self.box_card.is_on()
         self.b_draw.setToolTip("Draw the box on the video (OCR reads hard subtitles from this same area)")
         self.box_hint.setText("Drag the box on the video to move it" if on else "")
-        self.text_card.set_summary(f"{s['sub_font'] or 'Arial'} · {self._px()} px")
-        self.layout_card.set_summary(f"{int(s['sub_max_words'])} · {int(s['sub_max_lines'])} · "
-                                     f"{float(s['sub_max_duration']):g} s")
-        self.box_card.set_summary(f"{int(s['ocr_box_opacity'])}% · {int(s['ocr_box_blur'])} px" if on else "")
 
     def _box_toggled(self, on):
         self._changed(sub_box=on)
@@ -486,7 +588,8 @@ class StylePanel(QWidget):
     def _font_button(self):
         fam = self._s()["sub_font"] or "Arial"
         self.font.setText(fam)
-        self.font.setStyleSheet('font-family: "%s"; text-align: left; padding-left: 10px;' % fam.replace('"', ""))
+        self.font.setStyleSheet('QPushButton { font-family: "%s"; text-align: left; padding-left: 10px; '
+                                'padding-right: 30px; }' % fam.replace('"', ""))
 
     @wait_cursor()
     def _pick_font(self):

@@ -95,13 +95,25 @@ def _live_recipe(project, s) -> list[str]:
 BACK = ("dub", "export")        # the second half of a video's work (the first: subtitles, translation, separation)
 
 
-def run_video(video: str, steps, control, on_step=None, force=False, upto=None, part=None) -> Project:
-    """steps: list, or None = the saved recipe. on_step(step_id, state, text): start | done | failed | stopped.
-    part: 'front' or 'back' = only that half of the recipe (two videos are worked on at once: see lanes())."""
-    project = Project(video)
+def frozen_settings(video: str) -> dict:
+    """Everything a video is made with, taken when its turn starts: the shared settings, then its own look and
+    its own settings (gear). Changes made in the window after that are for the videos that start later (and
+    the window offers to make this one again at the end), so one video is never made half with the old and
+    half with the new settings."""
     from ..core.style import video_style
-    own = dict(video_style(project), **(project.meta.get("overrides") or {}))
-    with settings().overlay(own):    # this video's own look and settings, if any
+    project = Project(video)
+    return dict(settings().snapshot(), **video_style(project), **(project.meta.get("overrides") or {}))
+
+
+def run_video(video: str, steps, control, on_step=None, force=False, upto=None, part=None,
+              frozen: dict | None = None) -> Project:
+    """steps: list, or None = the saved recipe. on_step(step_id, state, text): start | done | failed | stopped.
+    part: 'front' or 'back' = only that half of the recipe (two videos are worked on at once: see lanes()).
+    frozen: frozen_settings() taken when the video's turn started (None = take them now)."""
+    project = Project(video)
+    if frozen is None:
+        frozen = frozen_settings(video)
+    with settings().overlay(frozen):    # this video's settings, look and own settings, fixed for its whole run
         if part is not None:
             all_steps = steps if steps is not None else recipe(project, upto)
             steps = [s for s in all_steps if (s in BACK) == (part == "back")]
