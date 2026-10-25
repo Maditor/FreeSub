@@ -255,6 +255,14 @@ class _Canvas(QWidget):
         tl = self.drag.get("preview") if self.drag and self.drag.get("preview") else self.v.tl
         self._clips(p, c, tl)
         self._cues(p, c)
+        band = self.drag.get("band") if self.drag and self.drag.get("kind") == "band" else None
+        if band is not None:                                # the box being drawn to choose lines
+            col = QColor(c["accent"])
+            col.setAlpha(50)
+            p.fillRect(band, col)
+            p.setPen(QPen(QColor(c["accent"]), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(band)
         if self.drop_x is not None:
             pen = QPen(QColor(c["accent"]), 2)
             p.setPen(pen)
@@ -362,7 +370,7 @@ class _Canvas(QWidget):
                 r = live["rect"]
             if r.right() < 0 or r.left() > self.width():
                 continue
-            sel = self.v.sel == ("cue", video, k)
+            sel = (video, k) in self.v.cues_sel
             own = str(k) in self.v.video(video).looks
             fill = QColor(c["accent"])
             fill.setAlpha(225 if sel else 70)
@@ -394,10 +402,14 @@ class _Canvas(QWidget):
         return None
 
     def mousePressEvent(self, e):
+        if e.button() == Qt.RightButton:
+            self._menu(e)
+            return
         if e.button() != Qt.LeftButton:
             return
         pos = e.position()
         self.setFocus()
+        mods = e.modifiers()
         if pos.y() < RULER + 4:
             self.drag = {"kind": "scrub"}
             self.v.seek_to(self.t_of(pos.x()))
@@ -406,6 +418,17 @@ class _Canvas(QWidget):
             hit = self._hit_cue(pos)
             if hit:
                 r, i, video, k, a, b = hit
+                if mods & Qt.ControlModifier:             # Ctrl+click: add / take away this line
+                    now = self.v.chosen_lines()
+                    now = [x for x in now if x != (video, k)] if (video, k) in now else now + [(video, k)]
+                    self.v.select(("cues", now))
+                    self.drag = {"kind": "none", "moved": False}
+                    return
+                if mods & Qt.ShiftModifier and self.v.anchor:     # Shift+click: everything from the first one
+                    self.v.select(("cues", self.range_lines(self.v.anchor, (video, k))))
+                    self.v.anchor = self.v.anchor or (video, k)
+                    self.drag = {"kind": "none", "moved": False}
+                    return
                 kind = "cue_l" if pos.x() - r.left() <= EDGE else "cue_r" if r.right() - pos.x() <= EDGE \
                     else "cue_move"
                 if self.v.locks["subs"]:
@@ -414,6 +437,10 @@ class _Canvas(QWidget):
                              "cue": k, "a": a, "b": b, "clip": i, "moved": False}
                 self.v.select(("cue", video, k))
                 return
+            # empty place in the subtitle row: drag a box to choose lines (a click: go there, as before)
+            self.drag = {"kind": "band", "x0": pos.x(), "band": None, "moved": False,
+                         "keep": self.v.chosen_lines() if mods & (Qt.ControlModifier | Qt.ShiftModifier) else []}
+            return
         if VID_Y <= pos.y() <= VID_Y + VID_H:
             hit = self._hit_clip(pos)
             if hit:
@@ -442,6 +469,16 @@ class _Canvas(QWidget):
             self.v.seek_to(self.t_of(pos.x()))
             return
         if kind == "none":
+            return
+        if kind == "band":
+            if not d["moved"] and abs(pos.x() - d["x0"]) < 3:
+                return
+            d["moved"] = True
+            x0, x1 = sorted((d["x0"], pos.x()))
+            d["band"] = QRectF(x0, SUB_Y, max(1.0, x1 - x0), SUB_H)
+            inside = [(v, k) for (r, _i, v, k, _a, _b) in self.cue_rects()
+                      if r.right() >= x0 and r.left() <= x1]
+            self.v.select(("cues", d["keep"] + [x for x in inside if x not in d["keep"]]))
             return
         dx = pos.x() - d["x0"]
         if not d["moved"] and abs(dx) < 3:
@@ -473,6 +510,46 @@ class _Canvas(QWidget):
             d["dt"] = dt
         self.update()
 
+    def range_lines(self, a, b) -> list:
+        """The lines from a to b (both included) in their order on the timeline."""
+        order = [(v, k) for (_r, _i, v, k, _a, _b) in sorted(self.cue_rects(visible_only=False),
+                                                             key=lambda q: q[0].left())]
+        if a not in order or b not in order:
+            return [b]
+        i, j = sorted((order.index(a), order.index(b)))
+        return order[i:j + 1]
+
+    def _menu(self, e):
+        """Right click on the subtitle row: delete the chosen lines, a new line at the playhead, make the voice
+        of the chosen lines again."""
+        pos = e.position()
+        if not (SUB_Y <= pos.y() <= SUB_Y + SUB_H):
+            return
+        from PySide6.QtWidgets import QMenu
+        from ..i18n import tr
+        hit = self._hit_cue(pos)
+        if hit and (hit[2], hit[3]) not in self.v.chosen_lines():
+            self.v.select(("cue", hit[2], hit[3]))           # a line outside the choice: that line only
+        lines = self.v.chosen_lines()
+        locked = self.v.locks["subs"]
+        m = QMenu(self)
+        n = len(lines)
+        a_del = m.addAction(tr("Delete line") if n <= 1 else tr("Delete {a} lines").replace("{a}", str(n)),
+                            self.v.delete_selected)
+        a_del.setEnabled(bool(lines) and not locked)
+        a_new = m.addAction(tr("Add subtitle"), self.v.add_line)          # at the playhead
+        a_new.setEnabled(bool(self.v.tl.clips) and not locked)
+        m.addSeparator()
+        a_voice = m.addAction(tr("Make the voice again") + (f" ({n})" if n > 1 else ""),
+                              lambda: self.v.lines_revoice.emit(lines))
+        a_voice.setEnabled(bool(lines))
+        a_voice.setToolTip(tr("Read these lines again, then play"))
+        m.setToolTipsVisible(True)
+        self.show_menu(m, self.mapToGlobal(pos.toPoint()))
+
+    def show_menu(self, m, at):
+        m.exec(at)
+
     SNAP = 8            # px: a dragged line's end this close to the playhead sticks to it
 
     def _snap(self, kind, r0, dx):
@@ -488,6 +565,12 @@ class _Canvas(QWidget):
     def mouseReleaseEvent(self, e):
         d, self.drag = self.drag, None
         drop_x, self.drop_x = self.drop_x, None
+        if d and d.get("kind") == "band":
+            if not d.get("moved"):                       # a click on an empty place: nothing chosen, go there
+                self.v.select(None)
+                self.v.seek_to(self.t_of(e.position().x()))
+            self.update()
+            return
         if not d or not d.get("moved"):
             self.update()
             return
@@ -627,6 +710,10 @@ class TimelineView(QWidget):
     selected = Signal(object)               # ("clip", id) | ("cue", video, index) | None
     retimed = Signal(str, int, float, float)    # video, line index, start, end (its video's time)
     retimed_back = Signal(str, int, float, float)   # the same, from undo / redo (not kept as a change again)
+    line_add = Signal(str, float)           # video, its time: a new subtitle line at the playhead
+    lines_delete = Signal(object)           # [(video, line index)]: the chosen subtitle lines, to delete
+    lines_revoice = Signal(object)          # [(video, line index)]: make their voice again (right click)
+    files_back = Signal(str, object)        # video, {subtitle file: its text}: undo / redo of a deleted line
     undo_requested = Signal()               # the undo / redo buttons: the window undoes whichever came last
     redo_requested = Signal()               # (a timeline change, or a subtitle edit)
     edit_text = Signal(str, int)            # video, line index
@@ -639,6 +726,8 @@ class TimelineView(QWidget):
         self.px = 40.0                      # pixels per second
         self.playhead = 0.0
         self.sel = None
+        self.cues_sel = []                  # the chosen subtitle lines [(video, index)] (Ctrl / Shift / a box)
+        self.anchor = None
         self._videos = {}
         self._undo, self._redo = [], []
         self.empty_text = "Drag videos here from the list on the left"
@@ -649,7 +738,8 @@ class TimelineView(QWidget):
         self.b_split = IconButton("split", "Cut the clip in two at the line (Ctrl+B)", size=18)
         self.b_left = IconButton("trim_left", "Delete the part of the clip left of the line (Q)", size=18)
         self.b_right = IconButton("trim_right", "Delete the part of the clip right of the line (W)", size=18)
-        self.b_delete = IconButton("delete", "Remove the selected clip (Delete)", size=18)
+        self.b_add_line = IconButton("add", "New subtitle line at the playhead", size=18)
+        self.b_delete = IconButton("delete", "Delete the selected clip or subtitle line (Delete)", size=18)
         self.total = label("", muted=True)
         self.b_zout = IconButton("zoom_out", "Zoom out (Ctrl+- or Ctrl + wheel)", size=18)
         self.b_zin = IconButton("zoom_in", "Zoom in (Ctrl+= or Ctrl + wheel)", size=18)
@@ -662,6 +752,7 @@ class TimelineView(QWidget):
         self.b_left.clicked.connect(lambda: self.delete_side("left"))
         self.b_right.clicked.connect(lambda: self.delete_side("right"))
         self.b_delete.clicked.connect(self.delete_selected)
+        self.b_add_line.clicked.connect(self.add_line)
         self.b_undo.clicked.connect(self.undo_requested.emit)
         self.b_redo.clicked.connect(self.redo_requested.emit)
         self.other_history = lambda: (False, False)      # the window: (subtitle edits to undo, to redo)
@@ -674,7 +765,8 @@ class TimelineView(QWidget):
         bar = QHBoxLayout(bar_box)
         bar.setContentsMargins(HEADS - 8, 0, 0, 0)
         bar.setSpacing(4)
-        for w in (self.b_undo, self.b_redo, None, self.b_split, self.b_left, self.b_right, self.b_delete):
+        for w in (self.b_undo, self.b_redo, None, self.b_split, self.b_left, self.b_right, self.b_add_line,
+                  self.b_delete):
             if w is None:
                 bar.addSpacing(10)
             else:
@@ -753,6 +845,11 @@ class TimelineView(QWidget):
         self.tl = tl
         self._changed()
 
+    def remember_files(self, video, before: dict, after: dict):
+        """Subtitle files of a video that is not the open one were changed here (a line deleted): Ctrl+Z writes
+        them back as they were."""
+        self._push(("files", video, before, after))
+
     def remember_cue(self, video, index, before, after):
         """A line of a video that is not the open one was moved here: Ctrl+Z brings its times back."""
         self._push(("cue", video, index, tuple(before), tuple(after)))
@@ -786,7 +883,7 @@ class TimelineView(QWidget):
         self.total.setText(f"{n} clip{'s' if n != 1 else ''} · {fmt_clock(total)}" if n else "")
         self.playhead = min(self.playhead, total)
         self._update_scroll()
-        for b in (self.b_split, self.b_delete, self.b_left, self.b_right):
+        for b in (self.b_split, self.b_delete, self.b_left, self.b_right, self.b_add_line):
             b.setEnabled(n > 0)
         self.refresh_history()
         if save:
@@ -804,16 +901,42 @@ class TimelineView(QWidget):
 
     # ------------------------------------------------------------ edits
     def select(self, sel):
+        """sel: ("clip", id) | ("cue", video, index) | ("cues", [(video, index), ...]) (several lines) | None."""
+        if sel and sel[0] == "cues":
+            many = list(dict.fromkeys(tuple(x) for x in sel[1]))
+            sel = None if not many else ("cue", *many[0]) if len(many) == 1 else ("cues", many)
+        self.cues_sel = [(sel[1], sel[2])] if sel and sel[0] == "cue" else list(sel[1]) if sel and sel[0] == "cues" \
+            else []
+        if sel and sel[0] == "cue":
+            self.anchor = (sel[1], sel[2])                 # Shift+click chooses from here
         self.sel = sel
         self.selected.emit(sel)
         self.canvas.update()
+
+    def chosen_lines(self) -> list:
+        """[(video, line index)] chosen now (one or several)."""
+        return list(getattr(self, "cues_sel", []))
 
     def selected_clip(self) -> int:
         if self.sel and self.sel[0] == "clip":
             return next((i for i, c in enumerate(self.tl.clips) if c["id"] == self.sel[1]), -1)
         return -1
 
+    def add_line(self):
+        """New line button: a new subtitle line where the playhead is (in the video of the clip under it)."""
+        if self.locks["subs"] or not self.tl.clips:
+            return
+        i, t = self.tl.locate(self.playhead)
+        if i >= 0:
+            self.line_add.emit(self.tl.clips[i]["video"], float(t))
+
     def delete_selected(self):
+        """Delete / the delete button: the chosen subtitle lines (the window deletes them, Ctrl+Z brings them
+        back), or the chosen clip."""
+        if self.chosen_lines():
+            if not self.locks["subs"]:
+                self.lines_delete.emit(self.chosen_lines())
+            return
         i = self.selected_clip()
         if i < 0 or self.locks["video"]:
             return
@@ -876,6 +999,12 @@ class TimelineView(QWidget):
             dst.append((time.monotonic(), "tl", self.tl.copy()))
             self.tl = e[2]
             self._changed()
+            return
+        if e[1] == "files":
+            _at, _k, video, before, after = e
+            dst.append((time.monotonic(), "files", video, after, before))
+            self.files_back.emit(video, before)
+            self.refresh_history()
             return
         _at, _k, video, index, before, after = e
         dst.append((time.monotonic(), "cue", video, index, after, before))

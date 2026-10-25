@@ -452,6 +452,8 @@ class StylePanel(QWidget):
             ed.setPlaceholderText(ph)
             ed.setFixedHeight(54)
             ed.setTabChangesFocus(True)
+            ed.setToolTip("Enter: save (the video shows it) · Shift+Enter: new line")
+            ed.installEventFilter(self)
         tx = QVBoxLayout()
         tx.setContentsMargins(0, 0, 0, 0)
         tx.setSpacing(6)
@@ -461,13 +463,12 @@ class StylePanel(QWidget):
         self.text_edit_card = Card("edit", "Line text", _card_body(tx), switch=False)
         self.text_edit_card.setVisible(False)
         lay.addWidget(self.text_edit_card)
-        self._text_timer = QTimer(self)
-        self._text_timer.setSingleShot(True)
-        self._text_timer.setInterval(600)
-        self._text_timer.timeout.connect(self._text_save)
+        # saved when Enter is pressed (or the box is left), not while typing: saving redraws the video, which
+        # made typing stutter
         self._text_loading = False
-        self.t_tr.textChanged.connect(lambda: None if self._text_loading else self._text_timer.start())
-        self.t_src.textChanged.connect(lambda: None if self._text_loading else self._text_timer.start())
+        self._text_dirty = False
+        self.t_tr.textChanged.connect(self._text_typed)
+        self.t_src.textChanged.connect(self._text_typed)
         for card in (self.presets, self.text_card, self.layout_card, self.box_card):
             lay.addWidget(card)
 
@@ -531,6 +532,7 @@ class StylePanel(QWidget):
             self.line_text.setText(tr("Line {a}").replace("{a}", str(number)))
         self.text_edit_card.setVisible(number is not None and texts is not None)
         if texts is not None:
+            self._text_dirty = False
             self._text_loading = True
             src, trans = texts
             self.t_src.setPlainText(src or "")
@@ -540,9 +542,31 @@ class StylePanel(QWidget):
             self._has_tr = trans is not None
             self._text_loading = False
 
+    def _text_typed(self):
+        if not self._text_loading:
+            self._text_dirty = True
+
+    def eventFilter(self, obj, e):
+        from PySide6.QtCore import QEvent
+        if obj in (self.t_tr, self.t_src):
+            if e.type() == QEvent.KeyPress and e.key() in (Qt.Key_Return, Qt.Key_Enter):
+                if e.modifiers() & Qt.ShiftModifier:
+                    obj.insertPlainText("\n")            # Shift+Enter: a new line in the subtitle
+                else:
+                    self._text_save()                     # Enter: save, the video shows it
+                return True
+            if e.type() == QEvent.FocusOut and self._text_dirty:
+                self._text_save()                         # left the box: what was typed is not lost
+        return super().eventFilter(obj, e)
+
+    def flush_text(self):
+        """Save what was typed and not saved yet (before another line is chosen)."""
+        self._text_save()
+
     def _text_save(self):
-        if self.line_mode is None:
+        if self.line_mode is None or not self._text_dirty:
             return
+        self._text_dirty = False
         if getattr(self, "_has_tr", False):
             self.line_text_changed.emit("translation", self.t_tr.toPlainText())
         self.line_text_changed.emit("original", self.t_src.toPlainText())

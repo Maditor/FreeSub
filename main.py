@@ -110,6 +110,11 @@ def _splash(app):
         f.setWeight(QFont.DemiBold)
         p.setFont(f)
         p.drawText(110, 66, "FreeSub")
+        from PySide6.QtGui import QFontMetrics
+        x_by = 110 + QFontMetrics(f).horizontalAdvance("FreeSub") + 8
+        p.setPen(QColor("#8a8a8a"))
+        p.setFont(QFont("Segoe UI", 9))
+        p.drawText(x_by, 66, "by Maditor")
         p.setPen(QColor("#8a8a8a"))
         p.setFont(QFont("Segoe UI", 10))
         p.drawText(112, 92, i18n.tr("Loading…"))

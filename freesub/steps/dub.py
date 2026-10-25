@@ -10,6 +10,7 @@ The clips are laid on a voice track (dub.wav) and mixed with the video's own sou
 dub_orig_volume while a line is read and comes back between lines (like TV voice-over).
 """
 import hashlib
+import re
 import time
 import threading
 import json
@@ -115,6 +116,8 @@ class Voice:
             text = say(expand(text))              # "v.v." -> "vân vân", 3.000 -> "ba nghìn" (subtitles keep them)
         spoken = pronouncer().respell_text(text)[0] if self.respell else text
         spoken = " ".join(spoken.split())
+        if not re.search(r"\w", spoken):
+            raise NoVoice(text)                   # nothing to say ("…", "?!", a blank line): left silent
         voice = self.voice_for(gender)
         key = hashlib.sha1(f"{voice}|{speed}|{spoken}".encode("utf-8")).hexdigest()[:16]
         ext = "mp3" if self.engine == "edge" else "wav"
@@ -141,9 +144,20 @@ class Voice:
                 except Exception as e:  # noqa: BLE001
                     last = e
             if last:
+                if _no_audio(last):
+                    raise NoVoice(spoken) from last   # Edge has no voice for these words: left silent
                 raise last
         _replace(tmp, path)
         return path
+
+
+class NoVoice(Exception):
+    """A line the voice can not read (nothing to say, or the online voice sends no audio for it): it is left
+    silent and the narration goes on."""
+
+
+def _no_audio(e) -> bool:
+    return type(e).__name__ == "NoAudioReceived" or "returned no audio" in str(e)
 
 
 _locks: dict = {}
@@ -362,9 +376,15 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
     lines = [None] * n                 # when each subtitle line is actually read (for the subtitles to follow)
     rows = [None] * n                  # per line: its text, how late it ran, the clips it used (the table)
 
+    silent = []
+
     def reading(u):
         control.check()
-        clip = voice.clip(u.text, u.gender, base)
+        try:
+            clip = voice.clip(u.text, u.gender, base)
+        except NoVoice:
+            silent.append(" ".join(u.text.split())[:80])
+            return None, np.zeros(0, dtype=np.float32)
         return clip, _trim_silence(_decode(clip))
 
     pending = deque()
@@ -378,6 +398,14 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
                 pending.append((u, ex.submit(reading, u)))
             u, fut = pending.popleft()
             clip, a = fut.result()
+            if clip is None:                                 # no voice for it: silent, keeps its own time
+                for k in u.lines:
+                    lines[k] = [round(cues[k].start, 3), round(cues[k].end, 3)]
+                    rows[k] = {"s": round(cues[k].start, 3), "t": cues[k].text, "pct": base, "over": 0,
+                               "clips": []}
+                k = u.lines[-1] + 1
+                control.progress(k / n * 0.95, f"Making voice {k}/{n} · {voice.engine.capitalize()}")
+                continue
             used = [os.path.basename(clip)]
             control.check()
             length = len(a) / RATE
@@ -438,6 +466,9 @@ def _voice_track(project, control, voice, cues, genders, duration, stamp=None) -
         ex.shutdown(wait=False, cancel_futures=True)
         raise
     ex.shutdown(wait=True)
+    if silent:
+        log.warning("Narration: %d reading(s) left silent (the voice had nothing to read, or sent no audio): %s",
+                    len(silent), " | ".join(silent[:10]))
     log.info("Narration timing: %d lines joined, %d readings faster, %d started late", stats["joined"],
              stats["faster"], stats["late"])
     log.info("Narration speed: minimum %d %%, maximum %d %%, the fastest reading was %d %%", base, ceiling, fastest)

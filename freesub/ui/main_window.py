@@ -290,6 +290,10 @@ class MainWindow(QMainWindow):
         self.timeline.selected.connect(self._tl_selected)
         self.timeline.retimed.connect(self._tl_retimed)
         self.timeline.retimed_back.connect(lambda v, i, a, b: self._tl_retimed(v, i, a, b, undoing=True))
+        self.timeline.lines_delete.connect(self._tl_delete_lines)
+        self.timeline.lines_revoice.connect(self._tl_revoice)
+        self.timeline.line_add.connect(self._tl_add_line)
+        self.timeline.files_back.connect(self._tl_files_back)
         self.timeline.undo_requested.connect(self._undo)
         self.timeline.redo_requested.connect(self._redo)
         self.timeline.other_history = lambda: (self.editor.undo_stamp() >= 0, self.editor.redo_stamp() >= 0)
@@ -1111,6 +1115,11 @@ class MainWindow(QMainWindow):
     def _tl_selected(self, sel):
         """A line clicked on the timeline: chosen, its words can be edited in Style. The video and the playhead
         stay where they are (the playhead marks where the line is to be moved)."""
+        self.style.flush_text()                           # words typed for the line chosen before: kept there
+        if sel and sel[0] == "cues":                      # several lines: no words to edit for one line
+            self._line_target = None
+            self.style.set_line_mode(None)
+            return
         if sel and sel[0] == "cue":
             _k, video, index = sel
             self._line_target = (video, index)
@@ -1142,8 +1151,11 @@ class MainWindow(QMainWindow):
         if not t:
             return
         video, index = t
-        if video == self.queue.current():
-            self.editor._flush()
+        ed = self.editor
+        if video == self.queue.current() and ed.project is not None:
+            if ed.set_line_text(index, kind, text):      # the table's history: Ctrl+Z brings the old words back
+                self.timeline.reload_video(video)
+            return
         p, src, tr = self._srt_files(video)
         path = tr if kind == "translation" else src
         if not path:
@@ -1195,6 +1207,150 @@ class MainWindow(QMainWindow):
         self.timeline.reload_video(video)
         if video == self.queue.current():
             ed.reload_keep_place()
+            self._cues_to_preview()
+
+    NEW_LINE = 2.0          # seconds: a new line's length (shorter when the next line starts sooner)
+
+    @staticmethod
+    def free_slot(cues, t, length=NEW_LINE):
+        """(start, end) for a new line at t among cues [(start, end)], or None: t is inside a line, or the next
+        line starts too soon after it (under 0.3 s)."""
+        if any(a <= t < b for a, b in cues):
+            return None
+        nxt = min([a for a, _b in cues if a > t] or [t + length])
+        end = min(t + length, nxt)
+        return (round(t, 3), round(end, 3)) if end - t >= 0.3 else None
+
+    def _tl_add_line(self, video, t):
+        """New line button on the timeline: an empty line at the playhead, chosen, its words ready to type in
+        Style. The open video's line goes through the subtitle table (Ctrl+Z takes it away); another video's is
+        written here (the timeline keeps it for Ctrl+Z)."""
+        from ..core.subtitle import Cue, load_srt, save_srt
+        ed = self.editor
+        current = video == self.queue.current() and ed.project is not None
+        if current:
+            ed._flush()
+            cues = [(c.start, c.end) for c in ed.src]
+        else:
+            p, src, trs = self._srt_files(video)
+            src = src or Project(video).src_srt
+            cues = [(c.start, c.end) for c in load_srt(src)] if os.path.isfile(src) else []
+        slot = self.free_slot(cues, t)
+        if slot is None:
+            QMessageBox.information(self, APP_NAME, tr("There is already a line at the playhead (or the next one "
+                                                       "starts right after it): move the playhead to an empty "
+                                                       "place first."))
+            return
+        a, b = slot
+        if current:
+            k = ed.insert_at(a, b)
+            if k < 0:
+                return
+        else:
+            import bisect
+            k = bisect.bisect_right([c[0] for c in cues], a)
+            before, after = {}, {}
+            for path in (src, trs):
+                if not path:
+                    continue
+                before[path] = open(path, encoding="utf-8").read() if os.path.isfile(path) else ""
+                lines = load_srt(path) if os.path.isfile(path) else []
+                lines.insert(min(k, len(lines)), Cue(a, b, ""))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                save_srt(lines, path)
+                with open(path, encoding="utf-8") as f:
+                    after[path] = f.read()
+            self.timeline.remember_files(video, before, after)
+        self.timeline.reload_video(video)
+        self.timeline.select(("cue", video, k))           # chosen: its words open in Style
+        self._tl_edit_text(video, k)
+
+    def _tl_delete_line(self, video, index):
+        self._tl_delete_lines([(video, index)])
+
+    def _tl_delete_lines(self, chosen):
+        """Delete on the timeline with subtitle lines chosen: they go (original and translation). The open
+        video's lines are deleted by the subtitle table (its question, its Ctrl+Z history); other videos' here,
+        after one question, kept by the timeline for Ctrl+Z."""
+        from ..core.subtitle import load_srt, save_srt
+        ed = self.editor
+        by_video = {}
+        for video, index in chosen:
+            by_video.setdefault(video, set()).add(index)
+        cur = self.queue.current() if ed.project is not None else None
+        changed = False
+        if cur in by_video:
+            rows = sorted(i for i in by_video.pop(cur) if 0 <= i < len(ed.src))
+            n = len(ed.src)
+            if rows:
+                ed.delete_lines(rows)
+                if len(ed.src) < n:
+                    changed = True
+                    self.timeline.reload_video(cur)
+                elif by_video:
+                    return                                  # said No: the others are kept too
+        jobs = []
+        for video, idx in by_video.items():
+            p, src, trs = self._srt_files(video)
+            if src:
+                cues = load_srt(src)
+                idx = sorted(i for i in idx if 0 <= i < len(cues))
+                if idx:
+                    jobs.append((video, src, trs, idx, cues))
+        if jobs:
+            total = sum(len(j[3]) for j in jobs)
+            if total == 1:
+                video, src, trs, idx, cues = jobs[0]
+                text = " ".join((cues[idx[0]].text or "").split())[:60]
+                ask = (tr("Delete line {a}?\n“{b}”\n(Ctrl+Z brings it back.)").replace("{b}", text) if text
+                       else tr("Delete line {a}?\n(Ctrl+Z brings it back.)")).replace("{a}", str(idx[0] + 1))
+            else:
+                ask = tr("Delete {a} lines?\n(Ctrl+Z brings them back.)").replace("{a}", str(total))
+            if confirm(self, ask, "line_delete", tr("Delete"), danger=True):
+                for video, src, trs, idx, _cues in jobs:
+                    gone = set(idx)
+                    before, after = {}, {}
+                    for path in (src, trs):           # the original first: the translation stays the newer file
+                        if not path:
+                            continue
+                        with open(path, encoding="utf-8") as f:
+                            before[path] = f.read()
+                        lines = [c for k, c in enumerate(load_srt(path)) if k not in gone]
+                        save_srt(lines, path)
+                        with open(path, encoding="utf-8") as f:
+                            after[path] = f.read()
+                    self.timeline.remember_files(video, before, after)
+                    self.timeline.reload_video(video)
+                changed = True
+        if changed:
+            self.timeline.select(None)
+
+    def _tl_revoice(self, chosen):
+        """Right click on the timeline → Make the voice again: like the subtitle table's (the open video's
+        lines; another video's lines are made again once it is opened)."""
+        cur = self.queue.current()
+        info = self.timeline.video(cur) if cur else None
+        starts = []
+        if info is not None:
+            want = {k for v, k in chosen if v == cur}
+            starts = [a for (a, _b, _t, k) in info.cues if k in want]
+        if not starts:
+            QMessageBox.information(self, APP_NAME, tr("Open the video of these lines first (click it in the "
+                                                       "list), then make their voice again."))
+            return
+        self.remake_lines(starts)
+
+    def _tl_files_back(self, video, files):
+        """Undo / redo of a line deleted on the timeline (a video that is not the open one)."""
+        for path in sorted(files, key=lambda f: f.endswith(TR_SRT)):     # the original first
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(files[path])
+            except OSError as e:
+                log.warning("Could not write back %s: %s", path, e)
+        self.timeline.reload_video(video)
+        if video == self.queue.current():
+            self.editor.reload_keep_place()
             self._cues_to_preview()
 
     def _undo(self):

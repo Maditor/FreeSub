@@ -246,6 +246,7 @@ QFrame#UnitField QSpinBox, QFrame#UnitField QDoubleSpinBox {{ background: transp
     min-height: 22px; }}
 QFrame#UnitField QSpinBox:focus, QFrame#UnitField QDoubleSpinBox:focus {{ border: none; background: transparent; }}
 QFrame#UnitField QLineEdit {{ background: transparent; border: none; padding: 0; min-height: 0; }}
+QLabel#Credit {{ color: {c['faint']}; font-size: 11px; background: transparent; }}
 QLabel#UnitText {{ color: {c['muted']}; background: transparent; }}
 QFrame#StyleDivider {{ background: {c['border']}; border: none; }}
 QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button {{ width: 18px; border: none; }}

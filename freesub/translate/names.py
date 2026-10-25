@@ -3,6 +3,8 @@ in the translation.
 
     Tanjiro            ->  heard right by Whisper
     炭治郎 = Tanjiro   ->  heard right, and always translated as Tanjiro
+    齐桦, 奇花 = Tề Hoa ->  the first is the right spelling (Whisper is told it); the others are how it is
+                          sometimes heard: all are translated as Tề Hoa
 
 One list is chosen in Steps → Subtitles (none = no list). The original side helps Whisper spell them; the
 pairs go to the translator (the AI follows them; with Google they are put in before the line is translated).
@@ -10,6 +12,7 @@ Kept in Documents\\FreeSub Data\\name_lists.json.
 """
 import json
 import os
+import re
 import threading
 import time
 
@@ -107,17 +110,33 @@ def chosen() -> dict | None:
     return get(settings().get("names_list") or "")
 
 
+_SEP = re.compile(r"\s*[,，、;；]\s*")
+
+
+def variants(original: str) -> list[str]:
+    """'齐桦, 奇花' -> ['齐桦', '奇花']: the right spelling first, then the ways it is sometimes heard."""
+    return [v for v in dict.fromkeys(x.strip() for x in _SEP.split(original or "")) if v]
+
+
+def sort_key(pair) -> tuple:
+    """A to Z by the translation (the original when there is none), accents ignored (Đ after D)."""
+    import unicodedata
+    text = (pair[1] or pair[0] or "").strip().lower().replace("đ", "d~")
+    base = "".join(c for c in unicodedata.normalize("NFD", text) if not unicodedata.combining(c))
+    return base, text, (pair[0] or "")
+
+
 def whisper_hint() -> str:
-    """The originals of the chosen list, for Whisper (it spells them right)."""
+    """The right spellings of the chosen list, for Whisper (it spells them right)."""
     lst = chosen()
     if not lst:
         return ""
-    return ", ".join(p[0] for p in lst["pairs"])[:600]
+    return ", ".join(variants(p[0])[0] for p in lst["pairs"] if variants(p[0]))[:600]
 
 
 def glossary() -> str:
-    """'original = translation' lines of the chosen list, for the translator."""
+    """'original = translation' lines of the chosen list, for the translator (each spelling on its own line)."""
     lst = chosen()
     if not lst:
         return ""
-    return "\n".join(f"{a} = {b}" for a, b in lst["pairs"] if b)
+    return "\n".join(f"{v} = {b}" for a, b in lst["pairs"] if b for v in variants(a))

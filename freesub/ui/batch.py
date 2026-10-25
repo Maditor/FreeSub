@@ -190,7 +190,7 @@ class BatchPage(QWidget):
     open_requested = Signal(str)          # open a video in the editor
     run_requested = Signal(str, list)     # "export" | "subs", videos
     own_changed = Signal(str)             # a video's own settings (gear) were changed
-    stop_requested = Signal()
+    stop_requested = Signal()               # (kept for callers: the Run button on top turns into Stop)
     add_files = Signal()
     add_folder = Signal()
     remove_requested = Signal(str)
@@ -227,8 +227,6 @@ class BatchPage(QWidget):
         self.b_subs.setToolTip("Make the .srt files (and the translation) for the ticked videos")
         self.b_run = button("Export all", lambda: self.run_requested.emit("export", self.checked()), primary=True)
         self.b_run.setObjectName("Big")
-        self.b_stop = button("Stop", self.stop_requested.emit)
-        self.b_stop.setVisible(False)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 12, 16, 12)
         lay.setSpacing(10)
@@ -236,7 +234,7 @@ class BatchPage(QWidget):
         lay.addWidget(row(self.b_add, self.b_folder, None))
         lay.addWidget(self.scroll, 1)
         lay.addWidget(self.empty, 1)
-        lay.addWidget(row(self.summary, None, self.b_subs, self.b_stop, self.b_run))
+        lay.addWidget(row(self.summary, None, self.b_subs, self.b_run))
         self._cols = 0
 
     # ---- videos
@@ -332,7 +330,6 @@ class BatchPage(QWidget):
 
     # ---- the run
     def set_running(self, running):
-        self.b_stop.setVisible(running)
         for w in (self.b_add, self.b_folder, self.all):
             w.setEnabled(not running)
         for c in self.cards.values():               # the gear stays: changes count for videos not started yet

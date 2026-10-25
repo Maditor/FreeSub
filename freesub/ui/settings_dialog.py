@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
                                QWidget)
 
 from ..config import data_dir, logs_dir, models_dir, settings, ui_language, user_dir
-from ..i18n import LANGS, Keep
+from ..i18n import LANGS, Keep, tr
 from ..core import ffmpeg, models
 from ..core.jobs import Cancelled
 from ..translate import ai
@@ -198,6 +198,14 @@ class SettingsDialog(QDialog):
         self.a_sep_dub.setChecked(bool(s["dub_separate"]))
         lay.addWidget(tick_row(self.a_sep_subs))
         lay.addWidget(tick_row(self.a_sep_dub))
+        lay.addWidget(heading("Narration"))
+        _os = os
+        self.a_threads = spin(0, _os.cpu_count() or 8, int(s.get("kokoro_threads", 0) or 0))
+        self.a_threads.setSpecialValueText(tr("Auto"))              # 0 = automatic
+        lay.addWidget(form_row("CPU threads (Kokoro)", self.a_threads,
+                               tr("This PC has {a} threads. Auto: one per CPU core. Fewer: the PC stays smoother "
+                                  "while the narration is made, but it takes longer")
+                               .replace("{a}", str(_os.cpu_count() or "?"))))
         lay.addWidget(heading("Reading hard subtitles (OCR)"))
         self.a_fps = spin(0.5, 10, float(s["ocr_fps"]), 0.5, " frames per second", 1)
         lay.addWidget(form_row("Frames read", self.a_fps, "More = more exact timing, slower"))
@@ -478,7 +486,7 @@ class SettingsDialog(QDialog):
         s.update(whisper_model=model, whisper_beam=beam,
                  whisper_device=self.a_device.currentData(), whisper_vad=self.a_vad.isChecked(),
                  whisper_filter=self.a_filt.isChecked(), ocr_fps=self.a_fps.value(), ocr_thorough=self.a_thorough.isChecked(),
-                 parallel_videos=self.a_lanes.currentData(),
+                 parallel_videos=self.a_lanes.currentData(), kokoro_threads=int(self.a_threads.value()),
                  whisper_separate=self.a_sep_subs.isChecked(), dub_separate=self.a_sep_dub.isChecked(),
                  export_encoder=self.a_enc.currentData(), export_container=self.a_cont.currentData(),
                  translate_fallback=self.fallback.isChecked())

@@ -719,6 +719,52 @@ class Editor(QWidget):
             self.tr.insert(k, Cue(a, b, ""))
         self._lines_changed(k, seek=True, edit=True)
 
+    def insert_at(self, a: float, b: float) -> int:
+        """A new empty line from a to b (the timeline's New line button): put in time order, Ctrl+Z takes it
+        away. Returns its row (-1: lines can not be added now)."""
+        if self._lines_blocked():
+            return -1
+        self._commit_edit()
+        import bisect
+        k = bisect.bisect_right([c.start for c in self.src], a)
+        self._remember("add line")
+        self.src.insert(k, Cue(a, b, ""))
+        if self.tr:
+            while len(self.tr) < len(self.src) - 1:
+                s = self.src[len(self.tr)]
+                self.tr.append(Cue(s.start, s.end, ""))
+            self.tr.insert(k, Cue(a, b, ""))
+        self._lines_changed(k)
+        return k
+
+    def set_line_text(self, i: int, kind: str, text: str) -> bool:
+        """The words of line i ('original' / 'translation') typed elsewhere (Style, for a line chosen on the
+        timeline): kept in the table's history, so Ctrl+Z brings the old words back. False: nothing changed."""
+        text = text.strip()
+        if not 0 <= i < len(self.src):
+            return False
+        if kind == "translation":
+            while len(self.tr) < len(self.src):
+                s = self.src[len(self.tr)]
+                self.tr.append(Cue(s.start, s.end, ""))
+            cue, col, key = self.tr[i], C_TR, "tr"
+        else:
+            cue, col, key = self.src[i], C_SRC, "src"
+        if cue.text == text:
+            return False
+        self._remember("line edit")
+        cue.text = text
+        self._dirty.add(key)
+        it = self.table.item(i, col)
+        if it is not None:
+            self.table.blockSignals(True)
+            it.setText(text.replace("\n", " / "))
+            self.table.blockSignals(False)
+        self._save_timer.stop()
+        self._save()
+        self.cues_changed.emit()
+        return True
+
     def delete_lines(self, rows):
         rows = sorted({r for r in rows if 0 <= r < len(self.src)})
         if not rows or self._lines_blocked():

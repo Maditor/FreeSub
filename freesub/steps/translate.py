@@ -281,17 +281,37 @@ def _cjk(c: str) -> bool:
     return "\u2e80" <= c <= "\u9fff" or "\uac00" <= c <= "\ud7af" or "\uf900" <= c <= "\ufaff"
 
 
+_CJK_CLS = "\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff"
+
+
 def spaced_names(text: str, pairs) -> str:
-    """A name / term of the list glued to a number in the translation ('tích phân100', '20tích phân')
-    gets its space back."""
+    """A name / term of the list glued to its neighbour in Google's answer gets its space back: next to a number
+    ('tích phân100', '20tích phân') or to Chinese / Japanese / Korean left untranslated; a name of several words
+    ('Tề Hoa', 'tích phân') also next to a letter ('Tề Hoađội trưởng'). Matched in any case ('Tích phân100' at
+    the start of a sentence)."""
     for _a, b in pairs:
-        if b and b in text:
-            e = re.escape(b)
-            if b[-1:].isalpha():
-                text = re.sub(e + r"(?=\d)", lambda m: m.group(0) + " ", text)
-            if b[:1].isalpha():
-                text = re.sub(r"(?<=\d)" + e, lambda m: " " + m.group(0), text)
+        b = (b or "").strip()
+        if not b or not re.search(re.escape(b), text, flags=re.I):
+            continue
+        e = re.escape(b)
+        near = rf"\d|[{_CJK_CLS}]" + (r"|[^\W\d_]" if " " in b else "")
+        if b[-1:].isalnum():
+            text = re.sub(rf"{e}(?={near})", lambda m: m.group(0) + " ", text, flags=re.I)
+        if b[:1].isalnum():
+            text = re.sub(rf"(?<={near}){e}", lambda m: " " + m.group(0), text, flags=re.I)
     return text
+
+
+def join_lines(parts, no_space: bool) -> str:
+    """Lines made into one sentence for Google: with spaces, or (Chinese, Japanese) without, but with a space
+    where a name put in by the list would touch the next line's first character ('…Tề Hoa' + '队长…')."""
+    parts = [p.strip() for p in parts if p.strip()]
+    if not no_space:
+        return " ".join(parts)
+    out = ""
+    for p in parts:
+        out += (" " if out and _glues(out[-1], p[0]) else "") + p
+    return out
 
 
 def _google_lines(lines, src, target, cues=None, genders=None):
@@ -302,7 +322,7 @@ def _google_lines(lines, src, target, cues=None, genders=None):
     from ..langs import NO_SPACE
     from .transcribe import size_of
     groups = sentence_groups(cues, lines, genders)
-    joined = [("" if src in NO_SPACE else " ").join(lines[k].strip() for k in g) for g in groups]
+    joined = [join_lines([lines[k] for k in g], src in NO_SPACE) for g in groups]
     got = google.translate(joined, sl, target)
     out = [""] * len(lines)
     alone = []

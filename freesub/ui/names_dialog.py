@@ -5,7 +5,7 @@ import logging
 import threading
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QDialog, QHBoxLayout, QHeaderView, QListWidget, QListWidgetItem,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QHBoxLayout, QHeaderView, QListWidget, QListWidgetItem,
                                QMenu, QMessageBox, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ..i18n import Keep, tr
@@ -53,6 +53,8 @@ class NamesDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.AllEditTriggers)
+        self.table.horizontalHeaderItem(0).setToolTip(tr("The right spelling first; other ways it is heard after a "
+                                                         "comma (齐桦, 奇花) are translated the same way"))
         self.b_delete = IconButton("delete", "Delete this list", size=20)
         self.b_delete.clicked.connect(self._delete)
         self.b_row_del = button("Remove the selected names", self._remove_rows)
@@ -100,7 +102,7 @@ class NamesDialog(QDialog):
         self.cur = self._get(it.data(Qt.UserRole)) if it is not None else None
         self._loading = True
         self.table.setRowCount(0)
-        for a, b in (self.cur["pairs"] if self.cur else []):
+        for a, b in sorted(self.cur["pairs"] if self.cur else [], key=names.sort_key):    # A to Z
             self._add_row(a, b)
         if self.cur is not None:
             self._add_row("", "")                       # an empty row to type the next name in
@@ -231,7 +233,7 @@ class NamesDialog(QDialog):
         if not found:
             QMessageBox.information(self, "FreeSub", "No names or special words were found.")
             return
-        have = {a for a, _b in (self.cur["pairs"] if self.cur else [])}
+        have = {v for a, _b in (self.cur["pairs"] if self.cur else []) for v in names.variants(a)}
         dlg = FoundDialog(self, found, have)
         if not dlg.exec():
             return
@@ -242,14 +244,15 @@ class NamesDialog(QDialog):
             x = {"id": names.new_id(), "name": self._video or tr("New list"), "pairs": []}
             self.work.append(x)
             self._fill(x["id"])
-        self.cur["pairs"] = [p for p in self._rows()] + [[a, b] for a, b in picked if a not in have]
+        self.cur["pairs"] = [p for p in self._rows()] + [[a, b] for a, b in picked
+                                                          if names.variants(a)[0] not in have]
         self.dirty = True
         self._selected(self.list.currentItem(), None)
 
     # ------------------------------------------------------------ save / close
     def _save(self):
         if self.cur is not None:
-            self.cur["pairs"] = self._rows()
+            self.cur["pairs"] = sorted(self._rows(), key=names.sort_key)
         names.save_all(self.work)
         if self.cur is not None:
             self.picked = self.cur["id"]                  # the list worked on is the one used
@@ -289,10 +292,14 @@ class FoundDialog(QDialog):
                 first.setToolTip(tr("Already in the list"))
             self.table.setItem(r, 0, first)
             self.table.setItem(r, 1, QTableWidgetItem(Keep(x["translation"])))
-            for c, text in ((2, ", ".join(x["seen"])), (3, tr(KIND_TEXT.get(x["kind"], "Term"))), (4, str(x["count"]))):
+            self.table.setItem(r, 2, QTableWidgetItem(Keep(", ".join(x["seen"]))))     # editable: fix or clear
+            for c, text in ((3, tr(KIND_TEXT.get(x["kind"], "Term"))), (4, str(x["count"]))):
                 it = QTableWidgetItem(Keep(text))
                 it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(r, c, it)
+        self.merge = QCheckBox(tr("Translate the \u201calso heard as\u201d spellings the same way (they go into "
+                                  "the original: 齐桦, 奇花 = Tề Hoa)"))
+        self.merge.setChecked(True)
         b_all = button("Tick all", lambda: self._tick(True))
         b_none = button("Untick all", lambda: self._tick(False))
         b_add = button("Add to the list", self.accept, primary=True)
@@ -300,6 +307,7 @@ class FoundDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setSpacing(8)
         lay.addWidget(self.table, 1)
+        lay.addWidget(self.merge)
         lay.addWidget(row(b_all, b_none, None, b_cancel, b_add))
 
     def _tick(self, on):
@@ -311,5 +319,9 @@ class FoundDialog(QDialog):
         for r in range(self.table.rowCount()):
             a = self.table.item(r, 0)
             if a.checkState() == Qt.Checked and a.text().strip():
-                out.append([a.text().strip(), (self.table.item(r, 1).text() if self.table.item(r, 1) else "").strip()])
+                orig = a.text().strip()
+                seen = self.table.item(r, 2).text() if self.table.item(r, 2) else ""
+                if self.merge.isChecked() and seen.strip():
+                    orig = ", ".join(names.variants(orig + ", " + seen))
+                out.append([orig, (self.table.item(r, 1).text() if self.table.item(r, 1) else "").strip()])
         return out

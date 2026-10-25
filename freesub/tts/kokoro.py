@@ -15,12 +15,13 @@ import os
 import pickle
 import re
 import threading
+import time
 import wave
 import zipfile
 
 import numpy as np
 
-from ..config import models_dir
+from ..config import models_dir, settings
 from ..core.models import download
 
 log = logging.getLogger(__name__)
@@ -135,16 +136,38 @@ def load_pt(path) -> np.ndarray:
 
 
 # ------------------------------------------------------------------ synthesis
+# On the CPU only: DirectML can not run this model (80070057 "The parameter is incorrect" on an RTX 2050, after
+# a 6 s window stall while loading it), see NOTES 1_1_64/65.
+def threads() -> int:
+    """CPU threads for Kokoro from Settings → Advanced (0 = automatic: ONNX Runtime uses one per core)."""
+    try:
+        n = int(settings().get("kokoro_threads", 0) or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return max(0, min(n, os.cpu_count() or 64))
+
+
+def _make_session(n_threads: int):
+    import onnxruntime as ort
+    so = ort.SessionOptions()
+    so.log_severity_level = 3
+    if n_threads:
+        so.intra_op_num_threads = n_threads
+        so.inter_op_num_threads = 1
+    path = os.path.join(folder(), "kokoro_vi.onnx")
+    return ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
+
+
 def _session():
-    if _STATE["session"] is None:
-        import onnxruntime as ort
-        so = ort.SessionOptions()
-        so.log_severity_level = 3
-        path = os.path.join(folder(), "kokoro_vi.onnx")
-        _STATE["session"] = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
+    """The model (made once; made again when the thread count in Settings changed). Call with _LOCK held."""
+    n = threads()
+    if _STATE["session"] is None or _STATE.get("threads") != n:
+        t0 = time.time()
+        _STATE["session"] = None                     # the old one is let go first (memory)
+        _STATE.update(session=_make_session(n), threads=n)
         with open(os.path.join(folder(), "config.json"), encoding="utf-8") as f:
             _STATE["config"] = json.load(f)
-        log.info("Kokoro voices loaded")
+        log.info("Kokoro voices loaded (%s CPU threads) in %.1f s", n or "auto", time.time() - t0)
     return _STATE["session"], _STATE["config"]
 
 
@@ -185,8 +208,9 @@ def synth(text: str, voice: str, path: str, speed: int = 100) -> str:
             if not ids:
                 continue
             style = pack[min(len(ids), len(pack)) - 1][None, :].astype(np.float32)
-            wav = sess.run(None, {"input_ids": np.asarray([[0, *ids, 0]], dtype=np.int64), "ref_s": style,
-                                  "speed": np.asarray(max(0.5, min(2.0, speed / 100)), dtype=np.float32)})[0]
+            feed = {"input_ids": np.asarray([[0, *ids, 0]], dtype=np.int64), "ref_s": style,
+                    "speed": np.asarray(max(0.5, min(2.0, speed / 100)), dtype=np.float32)}
+            wav = sess.run(None, feed)[0]
             chunks.append(np.asarray(wav, dtype=np.float32).reshape(-1))
             chunks.append(np.zeros(int(0.12 * RATE), dtype=np.float32))     # short pause between sentences
     audio = np.concatenate(chunks) if chunks else np.zeros(RATE // 10, dtype=np.float32)

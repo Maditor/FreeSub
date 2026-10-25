@@ -1,14 +1,7 @@
 # FreeSub
 
 Tạo phụ đề, dịch và thuyết minh cho video. Miễn phí, mã nguồn mở (MIT), chạy trên Windows 10/11 64-bit.
----
 
-<img width="1920" height="1080" alt="98ae3533-a3b1-4143-a754-9f639fbe5cfd" src="https://github.com/user-attachments/assets/e2fa13c0-6abe-4230-8057-1490fa67fc4c" />
-
-<img width="1920" height="1080" alt="3aa88340-3bd9-4a6b-add7-c1fe4256629b" src="https://github.com/user-attachments/assets/968e0b7a-802a-4a6d-9ea1-d89b83e1b6f9" />
-
-
----
 - **Phụ đề** từ giọng nói (Whisper) hoặc từ chữ có sẵn trên hình (OCR)
 - **Dịch** bằng Google Dịch (không cần khoá), Gemini hoặc Cloudflare (khoá miễn phí)
 - **Thuyết minh** bằng giọng Edge (trực tuyến), Piper hoặc Kokoro (offline), nghe thử ngay trên video
@@ -33,7 +26,8 @@ Tạo phụ đề, dịch và thuyết minh cho video. Miễn phí, mã nguồn 
 
 | Thành phần | Dung lượng |
 |---|---|
-| FreeSub (bản exe) hoặc thư viện (bản mã nguồn) | khoảng 1 GB / 2,5 GB |
+| FreeSub bản exe | tải về khoảng 250 MB, giải nén ra khoảng 600 MB |
+| Thư viện (bản mã nguồn) | khoảng 2,5 GB |
 | ffmpeg | 100 MB |
 | Hỗ trợ card NVIDIA (bản exe, tải khi cần) | 1,3 GB |
 | Model nghe: mỗi model | 1,5 – 3,1 GB |
@@ -47,7 +41,7 @@ Tạo phụ đề, dịch và thuyết minh cho video. Miễn phí, mã nguồn 
 
 ### Cách 1: bản exe (dễ nhất)
 
-1. Vào trang [Releases](https://github.com/Maditor/FreeSub/releases), tải file `FreeSub-x.y.z-win64.zip`.
+1. Vào trang [Releases](https://github.com/Maditor/FreeSub/releases), tải file `FreeSub-x.y.z-win64.zip` (khoảng 250 MB).
 2. Giải nén vào một thư mục **có đường dẫn không dấu**, ví dụ `D:\FreeSub`. Không đặt trong `Program Files`.
 3. Chạy `FreeSub.exe`. Lần đầu app hỏi tải **ffmpeg**: bấm đồng ý.
 4. Máy có card NVIDIA: vào **Cài đặt → Tải về**, tải **hỗ trợ GPU NVIDIA** (1,3 GB).

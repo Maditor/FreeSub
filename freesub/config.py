@@ -161,6 +161,7 @@ DEFAULTS = {
     "tts_kokoro_male": "tuan_ngoc",
     "tts_speed": 100,
     "tts_respell": True,
+    "kokoro_threads": 0,            # CPU threads for Kokoro voices (0 = automatic: one per core)
     "dub_max_speedup": 1.5,         # (old, not used any more)
     "dub_max_speed": 1.25,          # (old: a factor, replaced by dub_max_pct)
     "dub_max_pct": 125,             # narration: never read faster than this, in % of normal speed (like tts_speed);

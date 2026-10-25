@@ -78,6 +78,10 @@ class ProgressPanel(QFrame):
         self.clock = QLabel("")
         self.clock.setProperty("muted", True)
         self.b_log = IconButton("log", "Show / hide the log", checkable=True)
+        from ..i18n import Keep
+        self.credit = QLabel(Keep("FreeSub by Maditor"))     # faint, on the left of the log button while idle
+        self.credit.setObjectName("Credit")
+        self._running = False
 
         # bottom of the media column: the bar over the whole width, then 1/3 · time ... log button, then a message
         col = QVBoxLayout(self)
@@ -89,6 +93,7 @@ class ProgressPanel(QFrame):
         col.addWidget(self.bar)
         line = QHBoxLayout()
         line.setSpacing(8)
+        line.addWidget(self.credit)
         line.addWidget(self.title)
         line.addWidget(self.clock)
         line.addStretch(1)
@@ -125,14 +130,21 @@ class ProgressPanel(QFrame):
         self.clear_timer.timeout.connect(self.reset)
 
     def _idle(self, idle: bool):
+        self._running = not idle
         for w in (self.bar, self.clock):
             w.setVisible(not idle)
         self.title.setVisible(not idle and bool(self.title.text()))
         self.text.setVisible(False)                   # while it runs: only 1/3, the bar and the time
+        self._credit()
 
     def _set_title(self, text):
         self.title.setText(text)
         self.title.setVisible(bool(text))
+        self._credit()
+
+    def _credit(self):
+        """The 'FreeSub by Maditor' line: only when nothing runs and nothing is said (Done / Stopped...)."""
+        self.credit.setVisible(not self._running and not self.title.text())
 
     def _set_tip(self, video=None, doing=None):
         if video is not None:
