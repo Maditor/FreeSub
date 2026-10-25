@@ -1,6 +1,13 @@
 # FreeSub
 
 Tạo phụ đề, dịch và thuyết minh cho video. Miễn phí, mã nguồn mở (MIT), chạy trên Windows 10/11 64-bit.
+---
+<img width="1920" height="1080" alt="{D0374F73-3E5D-4204-B80F-D592DC13A4BC}" src="https://github.com/user-attachments/assets/e15050bc-bd60-4881-8f9f-7c145785c480" />
+<img width="1920" height="1080" alt="{D0932812-420C-47FC-BD98-79ED3EE0797E}" src="https://github.com/user-attachments/assets/31bac22e-ed95-47aa-ae49-14e936bccc12" />
+
+
+
+---
 
 - **Phụ đề** từ giọng nói (Whisper) hoặc từ chữ có sẵn trên hình (OCR)
 - **Dịch** bằng Google Dịch (không cần khoá), Gemini hoặc Cloudflare (khoá miễn phí)
