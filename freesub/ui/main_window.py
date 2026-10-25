@@ -33,6 +33,16 @@ from .widgets import CommandButton, IconButton, Marquee, confirm, separator, wai
 log = logging.getLogger(__name__)
 
 
+def same_file(a, b) -> bool:
+    """The same video file, however the path is written (Windows: C:\\ or c:/, any letter case)."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    norm = lambda p: os.path.normcase(os.path.abspath(p))     # noqa: E731
+    return norm(a) == norm(b)
+
+
 class _Signals(QObject):
     gpu_text = Signal(str)
 
@@ -577,15 +587,25 @@ class MainWindow(QMainWindow):
         self.style.refresh()
         self.preview.sync_speed()                      # the project's playback speed
         if not video:
+            self._shown_video = None
             self.preview.load("")
             self.editor.load("")
             self._header_name()
             return
-        self._live_off()
+        if not same_file(video, getattr(self, "_shown_video", None)):
+            self._live_off()                          # another video: its narration is not this one's
+        self._shown_video = video
         info = self.queue.info_for(video)
         self.style.set_video_height(info.get("height"))
         self._show_video(video, info)
         self._update_mix(video)
+        pv = self.preview
+        if pv.mix.ready() and not pv.live.on:          # its narration is made: heard at once (mic lit)
+            if not pv.b_mix.isChecked():
+                pv.b_mix.blockSignals(True)            # (not a click: nothing is made)
+                pv.b_mix.setChecked(True)
+                pv.b_mix.blockSignals(False)
+            pv.mix.set_enabled(True)
         self._header_name()
         self.editor.load(video)
         self._cues_to_preview()
@@ -745,13 +765,12 @@ class MainWindow(QMainWindow):
         self.remake_narration()
 
     def _live_off(self):
-        """Another video was opened: stop hearing (and lighting) the narration of the last one."""
+        """Another video was opened: the last one's narration stops (and its lit timeline). The mic button stays
+        as the user left it: only the user turns it off."""
         pv = self.preview
+        self._shown_video = None                      # the next video opened starts from nothing
         pv.live.clear()
         pv.mix.set_enabled(False)
-        pv.b_mix.blockSignals(True)
-        pv.b_mix.setChecked(False)
-        pv.b_mix.blockSignals(False)
 
     def _show_video(self, video, info):
         """Play the video, or a preview copy when the player cannot decode it (AV1 without GPU support)."""
@@ -1019,10 +1038,10 @@ class MainWindow(QMainWindow):
         return self.preview.b_timeline.isChecked()
 
     def _select_video(self, video):
-        if video not in self.queue.videos():
+        if not any(same_file(video, v) for v in self.queue.videos()):
             self.queue.add_paths([video])
         for i in range(self.queue.list.count()):
-            if self.queue.list.item(i).data(Qt.UserRole) == video:
+            if same_file(self.queue.list.item(i).data(Qt.UserRole), video):
                 if self.queue.list.currentRow() != i:
                     self.queue.list.setCurrentRow(i)
                 return
@@ -1055,7 +1074,7 @@ class MainWindow(QMainWindow):
         if play is None:
             play = pv.player.playbackState() == QMediaPlayer.PlayingState
         self.timeline.set_playhead(tl.to_timeline(i, vt), follow=False)
-        if clip["video"] != self.queue.current() or pv.path != clip["video"]:
+        if not same_file(clip["video"], self.queue.current()) or not same_file(pv.path, clip["video"]):
             self._tl_switch = clip["video"]           # until it is open, the old video's times mean nothing
             self._select_video(clip["video"])
             if pv.path != clip["video"]:
@@ -1093,9 +1112,9 @@ class MainWindow(QMainWindow):
         if not tl.clips:
             return
         i = getattr(self, "_tl_index", -1)
-        if not (0 <= i < len(tl.clips)) or tl.clips[i]["video"] != self.preview.path:
+        if not (0 <= i < len(tl.clips)) or not same_file(tl.clips[i]["video"], self.preview.path):
             i = next((k for k, c in enumerate(tl.clips)
-                      if c["video"] == self.preview.path and c["in"] - 0.05 <= t <= c["out"] + 0.05), -1)
+                      if same_file(c["video"], self.preview.path) and c["in"] - 0.05 <= t <= c["out"] + 0.05), -1)
             if i < 0:
                 return
             self._tl_index = i
